@@ -34,6 +34,9 @@ CONFIG = {
     "check_price_tolerance": 0.25,    # allowed gap between revenue / units and list price
     "score_min": 0,                   # competitor scores are clipped to this range (A6)
     "score_max": 100,
+    # Rules (DECISIONS.md section 2)
+    "precedence": ["R1", "R2", "R3", "R4", "R5"],  # first match is the primary action (A9)
+    "r1_market_trend_min": 0.0,       # R1: market trend must be above this
 }
 
 FILES = {
@@ -181,6 +184,75 @@ def run_checks(
 
 
 # ---------------------------------------------------------------------------
+# 3. Rules (DECISIONS.md section 2)
+# ---------------------------------------------------------------------------
+RULES = {
+    "R1": {
+        "name": "Fix availability",
+        "action": "Restock",
+        "impact_type": "Revenue at risk",
+        "formula": "12-week channel revenue",
+    },
+}
+
+
+def apply_rules(
+    skus: pd.DataFrame, competitors: pd.DataFrame, cfg: dict = CONFIG
+) -> tuple[pd.DataFrame, dict]:
+    """Test every rule on every SKU, then pick one primary action per SKU.
+
+    Adds to each SKU: its market share, every rule it triggers, the primary
+    rule (first match in the precedence order, A9), the action, and the
+    estimated impact with its formula. Returns (skus, context); context holds
+    the figures computed from this data drop, such as the average share.
+    """
+    skus = skus.copy()
+    context = {}
+
+    revenue = skus["channel_revenue_eur_12w"]
+    market = skus["market_revenue_eur_12w"]
+    channel_trend = skus["channel_sales_trend_12w_pct"]
+    market_trend = skus["market_sales_trend_12w_pct"]
+    active = skus["status"] == cfg["status_active"]
+    inactive = skus["status"] == cfg["status_inactive"]
+    out_of_stock = skus["stock_status"] == cfg["stock_out"]
+    low_stock = skus["stock_status"] == cfg["stock_low"]
+    seasonal = skus["seasonality"] != cfg["season_evergreen"]
+
+    # Our share of each product's market, and the overall average (A3).
+    avg_share = revenue.sum() / market.sum()
+    skus["share"] = revenue / market.where(market > 0)
+    context["avg_share"] = avg_share
+
+    # One column per rule: does the SKU trigger it, and what is the estimate.
+    trigger = pd.DataFrame(index=skus.index)
+    impact = pd.DataFrame(index=skus.index)
+
+    # R1 Fix availability: active, out of stock, market still growing.
+    trigger["R1"] = active & out_of_stock & (market_trend > cfg["r1_market_trend_min"])
+    impact["R1"] = revenue
+
+    # --- further rules are added above this line ---
+
+    # Primary action: the first rule that fires in the precedence order (A9).
+    order = [rule for rule in cfg["precedence"] if rule in trigger]
+    skus["rule"] = ""
+    skus["impact_eur"] = float("nan")
+    for rule in reversed(order):
+        skus.loc[trigger[rule], "rule"] = rule
+        skus.loc[trigger[rule], "impact_eur"] = impact.loc[trigger[rule], rule].round(2)
+    skus["rules_triggered"] = trigger[order].apply(
+        lambda row: ", ".join(rule for rule in order if row[rule]), axis=1
+    )
+    for field in ["name", "action", "impact_type", "formula"]:
+        column = {"name": "rule_name", "formula": "impact_formula"}.get(field, field)
+        skus[column] = skus["rule"].map(lambda rule: RULES[rule][field] if rule else "")
+
+    context["triggered_counts"] = {rule: int(trigger[rule].sum()) for rule in order}
+    return skus, context
+
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -206,6 +278,15 @@ def main(argv: list[str] | None = None) -> int:
     print("Consistency checks:")
     for key, count in check_counts.items():
         print(f"  {key:32s} {count}")
+
+    skus, context = apply_rules(skus, competitors)
+    print("Rules (primary action per SKU):")
+    flagged = skus[skus["rule"] != ""]
+    for rule, group in flagged.groupby("rule"):
+        print(
+            f"  {rule} {RULES[rule]['name']:22s} {len(group):3d} SKUs"
+            f"  EUR {group['impact_eur'].sum():>10,.0f}  {RULES[rule]['impact_type']}"
+        )
     return 0
 
 
