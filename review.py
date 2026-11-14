@@ -40,6 +40,9 @@ CONFIG = {
     "r2_market_trend_min": 0.20,      # R2: market trend must be above this
     "r3_market_trend_min": 0.15,      # R3: market trend must be above this
     "r3_share_factor": 0.5,           # R3: share must be below this fraction of the average
+    "r4_margin_max": 0.25,            # R4: margin must be below this
+    "r4_trend_min": 0.0,              # R4: channel and market trend must both be above this
+    "r4_price_increase": 0.03,        # R4: price increase used for the estimate
 }
 
 FILES = {
@@ -208,6 +211,12 @@ RULES = {
         "impact_type": "Incremental revenue",
         "formula": "Market revenue x average share - current revenue, floored at 0",
     },
+    "R4": {
+        "name": "Price review",
+        "action": "Review price",
+        "impact_type": "Extra revenue",
+        "formula": "12-week channel revenue x 3% price increase at constant volume",
+    },
 }
 
 
@@ -261,6 +270,15 @@ def apply_rules(
         & (skus["share"] < cfg["r3_share_factor"] * avg_share)
     )
     impact["R3"] = skus["gap_to_avg_share_eur"]
+
+    # R4 Price review: thin margin on a product that is growing here and in the market.
+    trigger["R4"] = (
+        active
+        & (skus["channel_margin_pct"] < cfg["r4_margin_max"])
+        & (channel_trend > cfg["r4_trend_min"])
+        & (market_trend > cfg["r4_trend_min"])
+    )
+    impact["R4"] = revenue * cfg["r4_price_increase"]
 
     # --- further rules are added above this line ---
 
