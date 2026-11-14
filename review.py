@@ -24,8 +24,10 @@ CONFIG = {
     # Labels used in the data
     "status_active": "aktiv",
     "status_inactive": "inaktiv",
+    "stock_in": "in_stock",
     "stock_out": "out_of_stock",
     "stock_low": "low_stock",
+    "season_evergreen": "Evergreen",  # any other seasonality value counts as seasonal
     # Consistency checks (DECISIONS.md section 3)
     "check_trend_total_loss": -1.00,  # trend a SKU with zero revenue should show
     "check_trend_collapse": -0.90,    # revenue above zero with a trend at or below this
@@ -79,8 +81,9 @@ def load_data(input_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Read the three files and return (skus joined with metadata, competitors).
 
     Stops with a DataError before any rule runs if a file or column is
-    missing, a product ID is duplicated, or the metadata does not match the
-    SKU file one to one.
+    missing, a required field is blank, a status or stock label is unknown,
+    a product ID is duplicated, or the metadata does not match the SKU file
+    one to one.
     """
     frames = {}
     for key, filename in FILES.items():
@@ -91,9 +94,22 @@ def load_data(input_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
         missing = [c for c in REQUIRED_COLUMNS[key] if c not in frame.columns]
         if missing:
             raise DataError(f"{filename} is missing columns: {', '.join(missing)}")
+        blank = [c for c in REQUIRED_COLUMNS[key] if frame[c].isna().any()]
+        if blank:
+            raise DataError(f"{filename} has blank values in: {', '.join(blank)}")
         frames[key] = frame
 
     skus, metadata, competitors = frames["skus"], frames["metadata"], frames["competitors"]
+
+    # An unknown label would silently drop a SKU from every rule, so stop instead.
+    known_labels = {
+        "status": {CONFIG["status_active"], CONFIG["status_inactive"]},
+        "stock_status": {CONFIG["stock_in"], CONFIG["stock_low"], CONFIG["stock_out"]},
+    }
+    for column, known in known_labels.items():
+        unknown = sorted(set(skus[column]) - known)
+        if unknown:
+            raise DataError(f"{FILES['skus']} has unknown {column} values: {', '.join(unknown)}")
 
     for name, frame, id_col in [
         (FILES["skus"], skus, "product_id"),
