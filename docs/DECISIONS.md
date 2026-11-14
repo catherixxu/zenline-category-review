@@ -1,6 +1,6 @@
 # Decisions log
 
-Status: APPROVED by Catherine, 12 Nov 2026. Changes need her agreement before this file is updated.
+Status: APPROVED by Catherine, 12 Nov 2026. Amended 14 Nov 2026 with the build decisions in section 7. Changes need her agreement before this file is updated.
 
 All counts and euro figures below were computed from the three provided CSV files. "12 weeks" means the 12-week period in the data.
 
@@ -63,13 +63,13 @@ Principles set by Catherine: restock first, then price review, and free up shelf
 | 4 | Relist 15 inactive SKUs | Change the range | R2 |
 | 5 | Fix execution on 13 under-indexed SKUs | Grow | R3 |
 
-Recommendations 3 and 4 are presented as a linked pair: delisting frees 131 cm, and the 15 relist candidates need 105 cm. Recommendations 1 and 2 are linked through HC0006, which is both out of stock and priced 40% below Rossmann.
+Recommendations 3 and 4 are presented as a linked pair. Delisting the 15 Evergreen SKUs frees 100 cm now, and the 4 seasonal markdown SKUs free a further 31 cm only after they sell through. The 15 relist candidates need 105 cm. The pairing depends on the open question in section 6 on whether inactive SKUs still hold their shelf space. Recommendations 1 and 2 are linked through HC0006, which is both out of stock and priced 40% below Rossmann.
 
 ## 5. Artifact and scope
 
 - One script (`review.py`) that writes `output/category_review.html` and `output/action_list.csv`.
 - Rule-based, no ML, no web app.
-- Built for reruns: input and output folders are arguments, outputs are dated, thresholds sit in one config block.
+- Built for reruns: input and output folders are arguments, thresholds sit in one config block. Output file names are fixed; the report and the CSV show the data date and the run date, and the caller chooses the output folder (B1).
 - Described in the README as next improvements, not built: run-over-run comparison, action status tracking, EAN-level competitor matching, seasonal calendar.
 
 ## 6. Open questions for the customer
@@ -77,3 +77,15 @@ Recommendations 3 and 4 are presented as a linked pair: delisting frees 131 cm, 
 - What does `inaktiv` mean operationally (A4)?
 - How is the trend calculated (A1)?
 - Do inactive SKUs still occupy the shelf space listed in the metadata?
+- Is there a minimum revenue per SKU per week that should replace the relative bottom-quartile cut-off in R5 (B2)?
+
+## 7. Build decisions, agreed 14 Nov 2026
+
+| # | Decision | Reason |
+|---|---|---|
+| B1 | Output file names are fixed (`category_review.html`, `action_list.csv`). The report and the CSV show the data date (latest `observed_date` in the competitor file) and the run date. History is kept by pointing the output argument at a new folder. | One predictable file to open; a scheduled run passes a dated folder. Replaces "outputs are dated" in section 5. |
+| B2 | The R5 bottom-quartile cut-off is recomputed on every run. The config holds 25%, and the report prints the euro value. €1,306 is the value on this data drop. | A fixed euro value stops meaning "bottom quarter" when the period or the category changes. |
+| B3 | Dependencies are pandas and pytest only. Charts are inline SVG written by the script. | The report opens offline in any browser. |
+| B4 | Every action is owned by the category manager. A separate "coordinate with" note names who else is involved. The note wording is confirmed when the action list is built. | All actions sit within category management scope. |
+| B5 | The Build chat writes a run-only README stub. The full README is written in the Handoff chat. | Keeps the build within the time budget. |
+| B6 | Shelf space is reported as 100 cm freed now and 31 cm after markdown sell-through, against 105 cm needed for relisting. | The 4 seasonal SKUs stay on the shelf until they sell through. See section 4. |
