@@ -70,7 +70,7 @@ Recommendations 3 and 4 are presented as a linked pair. Delisting the 15 Evergre
 
 ## 5. Artifact and scope
 
-- One script (`review.py`) that writes `output/category_review.html` and `output/action_list.csv`.
+- One script (`review.py`) that writes `output/executive_summary.html`, `output/category_review.html` and `output/action_list.csv` (B12).
 - Rule-based, no ML, no web app.
 - Built for reruns: input and output folders are arguments, thresholds sit in one config block. Output file names are fixed; the report and the CSV show the data date and the run date, and the caller chooses the output folder (B1).
 - Described in the README as next improvements, not built: run-over-run comparison, action status tracking, EAN-level competitor matching, seasonal calendar.
@@ -97,3 +97,4 @@ Recommendations 3 and 4 are presented as a linked pair. Delisting the 15 Evergre
 | B9 | New consistency check: an active SKU with zero revenue is marked "verify first". | HC0002 is a promote candidate that is in stock, sold nothing and has a −100% trend. That points to a listing problem, not a promotion gap. 13 SKUs are now marked, 10 of them with an action. |
 | B10 | "Coordinate with" notes: R1 supply chain (reorder and confirm the delivery date), R4 pricing (price ladder and competitor prices), R5 supplier and pricing (sell-through, returns and markdown level), R2 supplier (availability and terms), R3 store operations (placement and promotion slot). | Confirmed wording for the action list (B4). |
 | B11 | The action list CSV holds only SKUs with a primary action (67). The 9 watchlist SKUs without an action appear in the report's watchlist section only. | The watchlist is not a recommendation. |
+| B12 | Two HTML outputs from the same run: a one-page executive summary (the five actions, the decision asked for, the estimate, and what still needs a data check) and the in-depth category review. Each links to the other. | The in-depth review is analytical. A decision maker needs one page. Both read the same summary figures, so they cannot disagree. Replaces "one HTML report". |
