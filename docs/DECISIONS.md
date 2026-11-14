@@ -48,7 +48,7 @@ Watchlist, not a recommendation: 13 active low-stock SKUs in markets growing abo
 | Revenue recorded but zero units | 1 |
 | Implied price (revenue ÷ units) more than 25% off list price | 3 |
 | Competitor score outside 0–100 | 4 |
-| Active SKU with no revenue in the period (added 14 Nov 2026) | 5 (HC0002, HC0062, HC0117, HC0137, HC0193) |
+| Active product with no revenue in the period (added 14 Nov 2026) | 5 (HC0002, HC0062, HC0117, HC0137, HC0193) |
 
 The script also fails before running any rule if a file or column is missing, a required field is blank, `status` or `stock_status` holds an unknown label, an ID is duplicated, or the metadata does not join 1:1. The blank and unknown-label failures were added on 14 Nov 2026: an unknown label would otherwise drop a SKU from every rule without warning. Today there are no blanks and no unknown labels.
 
