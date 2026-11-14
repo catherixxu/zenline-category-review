@@ -46,6 +46,7 @@ CONFIG = {
     "r4b_price_gap": 0.20,            # R4b: note when our price differs from a competitor's by more
     "r5_revenue_quantile": 0.25,      # R5: revenue below this quantile of all SKUs, recomputed each run
     "r5_trend_max": 0.0,              # R5: channel and market trend must both be below this
+    "watch_market_trend_min": 0.15,   # Watchlist: active, low stock, market trend above this
 }
 
 FILES = {
@@ -319,6 +320,9 @@ def apply_rules(
     skus.loc[(skus["rule"] == "R5") & seasonal, "action"] = ACTION_SEASONAL_R5
     skus["shelf_freed_cm"] = skus["shelf_space_cm"].where(skus["rule"] == "R5")
 
+    # Watchlist, not a recommendation: could run out of stock while the market grows.
+    skus["watchlist"] = active & low_stock & (market_trend > cfg["watch_market_trend_min"])
+
     context["triggered_counts"] = {rule: int(trigger[rule].sum()) for rule in order}
 
     skus = add_price_gap_notes(skus, competitors, cfg)
@@ -389,13 +393,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {key:32s} {count}")
 
     skus, context = apply_rules(skus, competitors)
-    print("Rules (primary action per SKU):")
+    print(
+        f"Average share {context['avg_share']:.1%}, "
+        f"R5 revenue cut-off EUR {context['r5_revenue_cutoff']:,.0f}"
+    )
+    print("Rules (primary action per SKU; 'triggered' counts SKUs before precedence):")
     flagged = skus[skus["rule"] != ""]
     for rule, group in flagged.groupby("rule"):
         print(
-            f"  {rule} {RULES[rule]['name']:22s} {len(group):3d} SKUs"
-            f"  EUR {group['impact_eur'].sum():>10,.0f}  {RULES[rule]['impact_type']}"
+            f"  {rule} {RULES[rule]['name']:20s} {len(group):3d} SKUs"
+            f" ({context['triggered_counts'][rule]} triggered)"
+            f"  EUR {group['impact_eur'].sum():>7,.0f}  {RULES[rule]['impact_type']}"
         )
+    watch = skus[skus["watchlist"]]
+    print(f"  {len(flagged)} SKUs with an action, {int(flagged['verify_first'].sum())} to verify first")
+    print(f"  Price gap notes: {int((skus['price_gap_note'] != '').sum())}")
+    print(
+        f"  Watchlist: {len(watch)} SKUs, "
+        f"EUR {watch['channel_revenue_eur_12w'].sum():,.0f} channel revenue"
+    )
     return 0
 
 
