@@ -47,6 +47,8 @@ CONFIG = {
     "r5_revenue_quantile": 0.25,      # R5: revenue below this quantile of all SKUs, recomputed each run
     "r5_trend_max": 0.0,              # R5: channel and market trend must both be below this
     "watch_market_trend_min": 0.15,   # Watchlist: active, low stock, market trend above this
+    # Order of recommendations in the outputs: sequence of execution (DECISIONS.md section 4)
+    "report_order": ["R1", "R4", "R5", "R2", "R3"],
 }
 
 FILES = {
@@ -202,33 +204,39 @@ RULES = {
         "action": "Restock",
         "impact_type": "Revenue at risk",
         "formula": "12-week channel revenue",
+        "coordinate_with": "Supply chain: reorder and confirm the delivery date",
     },
     "R2": {
         "name": "Relist",
         "action": "Relist",
         "impact_type": "Incremental revenue",
         "formula": "Market revenue x average share - current revenue, floored at 0",
+        "coordinate_with": "Supplier: confirm availability and terms",
     },
     "R3": {
         "name": "Promote",
         "action": "Promote",
         "impact_type": "Incremental revenue",
         "formula": "Market revenue x average share - current revenue, floored at 0",
+        "coordinate_with": "Store operations: placement and promotion slot",
     },
     "R4": {
         "name": "Price review",
         "action": "Review price",
         "impact_type": "Extra revenue",
         "formula": "12-week channel revenue x 3% price increase at constant volume",
+        "coordinate_with": "Pricing: check the price ladder and competitor prices",
     },
     "R5": {
         "name": "Delist or mark down",
         "action": "Delist",  # seasonal SKUs get "Mark down" instead (A5)
         "impact_type": "Revenue forgone",
         "formula": "12-week channel revenue; shelf space freed is listed separately",
+        "coordinate_with": "Supplier and pricing: sell-through, returns and markdown level",
     },
 }
 ACTION_SEASONAL_R5 = "Mark down"
+OWNER = "Category manager"  # every action sits within category management (B4)
 
 
 def apply_rules(
@@ -366,6 +374,55 @@ def add_price_gap_notes(
 
 
 # ---------------------------------------------------------------------------
+# 4. Outputs
+# ---------------------------------------------------------------------------
+# Columns of the action list, in order. Evidence columns keep the names and
+# values of the source files so that every figure can be traced back.
+ACTION_LIST_COLUMNS = [
+    "recommendation", "action", "rule", "rule_name", "also_qualifies_for",
+    "product_id", "product_name", "brand", "subcategory", "shade_group",
+    "seasonality", "supplier", "status", "stock_status",
+    "estimated_impact_eur", "impact_type", "impact_formula", "shelf_freed_cm",
+    "price_eur", "channel_revenue_eur_12w", "channel_units_sold_12w",
+    "channel_margin_pct", "channel_sales_trend_12w_pct", "market_revenue_eur_12w",
+    "market_sales_trend_12w_pct", "share_of_market", "shelf_space_cm",
+    "price_gap_note", "verify_first", "verify_reason", "watchlist",
+    "owner", "coordinate_with", "data_date", "run_date",
+]
+
+
+def build_action_list(
+    skus: pd.DataFrame, data_date: str, run_date: str, cfg: dict = CONFIG
+) -> pd.DataFrame:
+    """One row per SKU with a primary action, in the order of the recommendations."""
+    rows = skus[skus["rule"] != ""].copy()
+    position = {rule: number for number, rule in enumerate(cfg["report_order"], start=1)}
+
+    def other_rules(row: pd.Series) -> str:
+        others = [rule for rule in row["rules_triggered"].split(", ") if rule != row["rule"]]
+        return "; ".join(f"{RULES[rule]['name']} ({rule})" for rule in others)
+
+    def yes_no(flags: pd.Series) -> pd.Series:
+        return flags.map({True: "yes", False: "no"})
+
+    rows["recommendation"] = rows["rule"].map(position)
+    rows["also_qualifies_for"] = rows.apply(other_rules, axis=1)
+    rows["estimated_impact_eur"] = rows["impact_eur"]
+    rows["share_of_market"] = rows["share"].round(4)
+    rows["verify_first"] = yes_no(rows["verify_first"])
+    rows["watchlist"] = yes_no(rows["watchlist"])
+    rows["owner"] = OWNER
+    rows["coordinate_with"] = rows["rule"].map(lambda rule: RULES[rule]["coordinate_with"])
+    rows["data_date"] = data_date
+    rows["run_date"] = run_date
+
+    rows = rows.sort_values(
+        ["recommendation", "estimated_impact_eur", "product_id"], ascending=[True, False, True]
+    )
+    return rows[ACTION_LIST_COLUMNS].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -385,9 +442,10 @@ def main(argv: list[str] | None = None) -> int:
 
     skus, competitors, check_counts = run_checks(skus, competitors)
 
-    data_date = competitors["observed_date"].max()
+    data_date = str(competitors["observed_date"].max())
+    run_date = date.today().isoformat()
     print(f"Loaded {len(skus)} SKUs and {len(competitors)} competitor rows from {args.input}/")
-    print(f"Data date {data_date}, run date {date.today().isoformat()}")
+    print(f"Data date {data_date}, run date {run_date}")
     print("Consistency checks:")
     for key, count in check_counts.items():
         print(f"  {key:32s} {count}")
@@ -412,6 +470,13 @@ def main(argv: list[str] | None = None) -> int:
         f"  Watchlist: {len(watch)} SKUs, "
         f"EUR {watch['channel_revenue_eur_12w'].sum():,.0f} channel revenue"
     )
+
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    action_list = build_action_list(skus, data_date, run_date)
+    action_list_path = output_dir / "action_list.csv"
+    action_list.to_csv(action_list_path, index=False, encoding="utf-8")
+    print(f"Wrote {action_list_path} ({len(action_list)} SKUs)")
     return 0
 
 
