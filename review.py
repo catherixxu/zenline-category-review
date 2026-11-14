@@ -82,6 +82,7 @@ SKU_CHECKS = {
     "collapse_with_revenue": "Revenue recorded, but the sales trend shows a near-total collapse",
     "revenue_without_units": "Revenue recorded with zero units sold",
     "implied_price_gap": "Revenue / units differs from the list price by more than {tol:.0%}",
+    "active_without_revenue": "Active SKU with no revenue in the period",
 }
 
 
@@ -178,6 +179,7 @@ def run_checks(
     flags["collapse_with_revenue"] = (revenue > 0) & (trend <= cfg["check_trend_collapse"])
     flags["revenue_without_units"] = (revenue > 0) & (units == 0)
     flags["implied_price_gap"] = price_gap > cfg["check_price_tolerance"]
+    flags["active_without_revenue"] = (skus["status"] == cfg["status_active"]) & (revenue == 0)
 
     labels = {k: v.format(tol=cfg["check_price_tolerance"]) for k, v in SKU_CHECKS.items()}
     skus["verify_first"] = flags.any(axis=1)

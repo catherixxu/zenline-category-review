@@ -48,6 +48,7 @@ Watchlist, not a recommendation: 13 active low-stock SKUs in markets growing abo
 | Revenue recorded but zero units | 1 |
 | Implied price (revenue ÷ units) more than 25% off list price | 3 |
 | Competitor score outside 0–100 | 4 |
+| Active SKU with no revenue in the period (added 14 Nov 2026) | 5 (HC0002, HC0062, HC0117, HC0137, HC0193) |
 
 The script also fails before running any rule if a file or column is missing, a required field is blank, `status` or `stock_status` holds an unknown label, an ID is duplicated, or the metadata does not join 1:1. The blank and unknown-label failures were added on 14 Nov 2026: an unknown label would otherwise drop a SKU from every rule without warning. Today there are no blanks and no unknown labels.
 
@@ -93,3 +94,6 @@ Recommendations 3 and 4 are presented as a linked pair. Delisting the 15 Evergre
 | B6 | Shelf space is reported as 100 cm freed now and 31 cm after markdown sell-through, against 105 cm needed for relisting. | The 4 seasonal SKUs stay on the shelf until they sell through. See section 4. |
 | B7 | R4 is reported on the 11 SKUs where it is the primary action (€2,347). The 5 SKUs that also trigger R4 but are restock or promote first are mentioned, not counted. | Keeps A9: no SKU appears in two recommendations. Replaces 16 SKUs and €3,526. |
 | B8 | Confirmed by reproduction: the average share is total channel revenue ÷ total market revenue over all 235 SKUs (6.3%), and the R5 bottom quartile is taken over all 235 SKUs, active and inactive. | These readings reproduce the approved R2, R3 and R5 figures exactly. |
+| B9 | New consistency check: an active SKU with zero revenue is marked "verify first". | HC0002 is a promote candidate that is in stock, sold nothing and has a −100% trend. That points to a listing problem, not a promotion gap. 13 SKUs are now marked, 10 of them with an action. |
+| B10 | "Coordinate with" notes: R1 supply chain (reorder and confirm the delivery date), R4 pricing (price ladder and competitor prices), R5 supplier and pricing (sell-through, returns and markdown level), R2 supplier (availability and terms), R3 store operations (placement and promotion slot). | Confirmed wording for the action list (B4). |
+| B11 | The action list CSV holds only SKUs with a primary action (67). The 9 watchlist SKUs without an action appear in the report's watchlist section only. | The watchlist is not a recommendation. |
