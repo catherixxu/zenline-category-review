@@ -37,6 +37,7 @@ CONFIG = {
     # Rules (DECISIONS.md section 2)
     "precedence": ["R1", "R2", "R3", "R4", "R5"],  # first match is the primary action (A9)
     "r1_market_trend_min": 0.0,       # R1: market trend must be above this
+    "r2_market_trend_min": 0.20,      # R2: market trend must be above this
 }
 
 FILES = {
@@ -193,6 +194,12 @@ RULES = {
         "impact_type": "Revenue at risk",
         "formula": "12-week channel revenue",
     },
+    "R2": {
+        "name": "Relist",
+        "action": "Relist",
+        "impact_type": "Incremental revenue",
+        "formula": "Market revenue x average share - current revenue, floored at 0",
+    },
 }
 
 
@@ -223,6 +230,8 @@ def apply_rules(
     avg_share = revenue.sum() / market.sum()
     skus["share"] = revenue / market.where(market > 0)
     context["avg_share"] = avg_share
+    # Revenue we would add by reaching the average share, never below zero (A7).
+    skus["gap_to_avg_share_eur"] = (market * avg_share - revenue).clip(lower=0).round(2)
 
     # One column per rule: does the SKU trigger it, and what is the estimate.
     trigger = pd.DataFrame(index=skus.index)
@@ -231,6 +240,10 @@ def apply_rules(
     # R1 Fix availability: active, out of stock, market still growing.
     trigger["R1"] = active & out_of_stock & (market_trend > cfg["r1_market_trend_min"])
     impact["R1"] = revenue
+
+    # R2 Relist: inactive, but the market for the product is growing strongly.
+    trigger["R2"] = inactive & (market_trend > cfg["r2_market_trend_min"])
+    impact["R2"] = skus["gap_to_avg_share_eur"]
 
     # --- further rules are added above this line ---
 
