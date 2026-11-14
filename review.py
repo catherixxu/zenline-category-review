@@ -38,6 +38,8 @@ CONFIG = {
     "precedence": ["R1", "R2", "R3", "R4", "R5"],  # first match is the primary action (A9)
     "r1_market_trend_min": 0.0,       # R1: market trend must be above this
     "r2_market_trend_min": 0.20,      # R2: market trend must be above this
+    "r3_market_trend_min": 0.15,      # R3: market trend must be above this
+    "r3_share_factor": 0.5,           # R3: share must be below this fraction of the average
 }
 
 FILES = {
@@ -200,6 +202,12 @@ RULES = {
         "impact_type": "Incremental revenue",
         "formula": "Market revenue x average share - current revenue, floored at 0",
     },
+    "R3": {
+        "name": "Promote",
+        "action": "Promote",
+        "impact_type": "Incremental revenue",
+        "formula": "Market revenue x average share - current revenue, floored at 0",
+    },
 }
 
 
@@ -244,6 +252,15 @@ def apply_rules(
     # R2 Relist: inactive, but the market for the product is growing strongly.
     trigger["R2"] = inactive & (market_trend > cfg["r2_market_trend_min"])
     impact["R2"] = skus["gap_to_avg_share_eur"]
+
+    # R3 Promote: active and available, market growing, but our share is weak.
+    trigger["R3"] = (
+        active
+        & ~out_of_stock
+        & (market_trend > cfg["r3_market_trend_min"])
+        & (skus["share"] < cfg["r3_share_factor"] * avg_share)
+    )
+    impact["R3"] = skus["gap_to_avg_share_eur"]
 
     # --- further rules are added above this line ---
 
