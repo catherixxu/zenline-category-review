@@ -25,9 +25,11 @@ All counts and euro figures below were computed from the three provided CSV file
 | R1 Fix availability | Active, out of stock, market trend above 0 | 9 | €61,646 revenue at risk | Sum of 12-week channel revenue |
 | R2 Relist | Inactive, market trend above +20% | 15 | €30,364 incremental | Market revenue × average share − current revenue, floored at 0 |
 | R3 Promote | Active, not out of stock, market trend above +15%, share below half the average | 13 | €20,486 incremental | Same as R2 |
-| R4 Price review | Active, margin below 25%, channel and market trend both above 0 | 16 | €3,526 | Revenue × 3% price increase at constant volume |
+| R4 Price review | Active, margin below 25%, channel and market trend both above 0 | 11 as primary action (16 triggered) | €2,347 | Revenue × 3% price increase at constant volume |
 | R4b Price gap note | Exact product-name match with a competitor row, price differs by more than 20% | 2 | Not sized | Our price ÷ competitor price − 1 |
 | R5 Delist or mark down | Active, revenue in the bottom quartile (below €1,306), channel and market trend both below 0 | 19 | 131 cm of shelf freed, €6,689 revenue forgone | Sum of shelf space and revenue |
+
+R4 triggers on 16 SKUs (€3,526). Five of them have an earlier primary action under A9: HC0043, HC0053 and HC0070 are restock first (R1), and HC0061 and HC0094 are promote first (R3). The report counts the 11 and mentions the 5 (B7).
 
 R4b is a secondary note. It does not change a SKU's primary action, and it is shown as evidence in the price review. Today it catches:
 - HC0006 Garnier Olia Copper Glow: €4.77 against €7.95 at rossmann.de, 40% below. Primary action R1.
@@ -58,7 +60,7 @@ Principles set by Catherine: restock first, then price review, and free up shelf
 | # | Recommendation | Stage | Rule |
 |---|---|---|---|
 | 1 | Restock 9 out-of-stock SKUs | Fix the existing range | R1 |
-| 2 | Price review on 16 SKUs, plus the 2 price gap notes | Fix the existing range | R4, R4b |
+| 2 | Price review on 11 SKUs, plus the 2 price gap notes | Fix the existing range | R4, R4b |
 | 3 | Delist or mark down 19 SKUs | Change the range | R5 |
 | 4 | Relist 15 inactive SKUs | Change the range | R2 |
 | 5 | Fix execution on 13 under-indexed SKUs | Grow | R3 |
@@ -89,3 +91,5 @@ Recommendations 3 and 4 are presented as a linked pair. Delisting the 15 Evergre
 | B4 | Every action is owned by the category manager. A separate "coordinate with" note names who else is involved. The note wording is confirmed when the action list is built. | All actions sit within category management scope. |
 | B5 | The Build chat writes a run-only README stub. The full README is written in the Handoff chat. | Keeps the build within the time budget. |
 | B6 | Shelf space is reported as 100 cm freed now and 31 cm after markdown sell-through, against 105 cm needed for relisting. | The 4 seasonal SKUs stay on the shelf until they sell through. See section 4. |
+| B7 | R4 is reported on the 11 SKUs where it is the primary action (€2,347). The 5 SKUs that also trigger R4 but are restock or promote first are mentioned, not counted. | Keeps A9: no SKU appears in two recommendations. Replaces 16 SKUs and €3,526. |
+| B8 | Confirmed by reproduction: the average share is total channel revenue ÷ total market revenue over all 235 SKUs (6.3%), and the R5 bottom quartile is taken over all 235 SKUs, active and inactive. | These readings reproduce the approved R2, R3 and R5 figures exactly. |
