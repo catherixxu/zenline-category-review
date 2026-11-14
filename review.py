@@ -43,6 +43,7 @@ CONFIG = {
     "r4_margin_max": 0.25,            # R4: margin must be below this
     "r4_trend_min": 0.0,              # R4: channel and market trend must both be above this
     "r4_price_increase": 0.03,        # R4: price increase used for the estimate
+    "r4b_price_gap": 0.20,            # R4b: note when our price differs from a competitor's by more
 }
 
 FILES = {
@@ -297,7 +298,45 @@ def apply_rules(
         skus[column] = skus["rule"].map(lambda rule: RULES[rule][field] if rule else "")
 
     context["triggered_counts"] = {rule: int(trigger[rule].sum()) for rule in order}
+
+    skus = add_price_gap_notes(skus, competitors, cfg)
     return skus, context
+
+
+def add_price_gap_notes(
+    skus: pd.DataFrame, competitors: pd.DataFrame, cfg: dict = CONFIG
+) -> pd.DataFrame:
+    """R4b: note a price gap where a competitor row has exactly our product name.
+
+    A secondary note only. It never changes the primary action (A6).
+    """
+    def clean(names: pd.Series) -> pd.Series:
+        return names.str.strip().str.lower()
+
+    ours = skus[["product_id", "price_eur"]].assign(name_key=clean(skus["product_name"]))
+    theirs = competitors[["price_eur", "source"]].assign(
+        name_key=clean(competitors["competitor_product_name"])
+    )
+    matches = ours.merge(theirs, on="name_key", suffixes=("", "_competitor"))
+    matches["price_gap_pct"] = matches["price_eur"] / matches["price_eur_competitor"] - 1
+    matches = matches[matches["price_gap_pct"].abs() > cfg["r4b_price_gap"]]
+    # If one product matches several competitor rows, keep the widest gap.
+    matches = matches.sort_values("price_gap_pct", key=abs, ascending=False)
+    matches = matches.drop_duplicates("product_id").set_index("product_id")
+
+    def describe(row: pd.Series) -> str:
+        direction = "above" if row["price_gap_pct"] > 0 else "below"
+        return (
+            f"EUR {row['price_eur']:.2f} against EUR {row['price_eur_competitor']:.2f} "
+            f"at {row['source']}, {abs(row['price_gap_pct']):.0%} {direction}"
+        )
+
+    notes = matches.apply(describe, axis=1) if len(matches) else pd.Series(dtype=str)
+    skus["competitor_price_eur"] = skus["product_id"].map(matches["price_eur_competitor"])
+    skus["competitor_source"] = skus["product_id"].map(matches["source"]).fillna("")
+    skus["price_gap_pct"] = skus["product_id"].map(matches["price_gap_pct"]).round(3)
+    skus["price_gap_note"] = skus["product_id"].map(notes).fillna("")
+    return skus
 
 
 # ---------------------------------------------------------------------------
