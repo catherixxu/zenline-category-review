@@ -44,6 +44,8 @@ CONFIG = {
     "r4_trend_min": 0.0,              # R4: channel and market trend must both be above this
     "r4_price_increase": 0.03,        # R4: price increase used for the estimate
     "r4b_price_gap": 0.20,            # R4b: note when our price differs from a competitor's by more
+    "r5_revenue_quantile": 0.25,      # R5: revenue below this quantile of all SKUs, recomputed each run
+    "r5_trend_max": 0.0,              # R5: channel and market trend must both be below this
 }
 
 FILES = {
@@ -218,7 +220,14 @@ RULES = {
         "impact_type": "Extra revenue",
         "formula": "12-week channel revenue x 3% price increase at constant volume",
     },
+    "R5": {
+        "name": "Delist or mark down",
+        "action": "Delist",  # seasonal SKUs get "Mark down" instead (A5)
+        "impact_type": "Revenue forgone",
+        "formula": "12-week channel revenue; shelf space freed is listed separately",
+    },
 }
+ACTION_SEASONAL_R5 = "Mark down"
 
 
 def apply_rules(
@@ -281,7 +290,17 @@ def apply_rules(
     )
     impact["R4"] = revenue * cfg["r4_price_increase"]
 
-    # --- further rules are added above this line ---
+    # R5 Delist or mark down: low revenue, shrinking here and in the market.
+    # The cut-off is the bottom quartile of revenue across all SKUs in this drop (B2).
+    revenue_cutoff = revenue.quantile(cfg["r5_revenue_quantile"])
+    context["r5_revenue_cutoff"] = revenue_cutoff
+    trigger["R5"] = (
+        active
+        & (revenue < revenue_cutoff)
+        & (channel_trend < cfg["r5_trend_max"])
+        & (market_trend < cfg["r5_trend_max"])
+    )
+    impact["R5"] = revenue
 
     # Primary action: the first rule that fires in the precedence order (A9).
     order = [rule for rule in cfg["precedence"] if rule in trigger]
@@ -296,6 +315,9 @@ def apply_rules(
     for field in ["name", "action", "impact_type", "formula"]:
         column = {"name": "rule_name", "formula": "impact_formula"}.get(field, field)
         skus[column] = skus["rule"].map(lambda rule: RULES[rule][field] if rule else "")
+    # Seasonal SKUs are marked down, not delisted (A5). Shelf space only counts for R5.
+    skus.loc[(skus["rule"] == "R5") & seasonal, "action"] = ACTION_SEASONAL_R5
+    skus["shelf_freed_cm"] = skus["shelf_space_cm"].where(skus["rule"] == "R5")
 
     context["triggered_counts"] = {rule: int(trigger[rule].sum()) for rule in order}
 
