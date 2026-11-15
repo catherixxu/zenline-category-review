@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Category opportunity review: ZenBeauty Retail, Beauty > Hair Coloration.
+"""Zenline category review: Beauty > Hair Coloration.
 
 Usage:
     python review.py --input data --output output
@@ -10,10 +10,11 @@ Every rule and threshold is documented in docs/DECISIONS.md.
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import math
 import sys
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -51,6 +52,9 @@ CONFIG = {
     "watch_market_trend_min": 0.15,   # Watchlist: active, low stock, market trend above this
     # Order of recommendations in the outputs: sequence of execution (DECISIONS.md section 4)
     "report_order": ["R1", "R4", "R5", "R2", "R3"],
+    # An estimate is shown as provisional when products with an open data point carry at least
+    # this share of it
+    "provisional_share_min": 0.10,
 }
 
 FILES = {
@@ -403,7 +407,7 @@ ACTION_LIST_COLUMNS = [
     "channel_margin_pct", "channel_sales_trend_12w_pct", "market_revenue_eur_12w",
     "market_sales_trend_12w_pct", "share_of_market", "shelf_space_cm",
     "price_gap_note", "verify_first", "verify_reason", "watchlist",
-    "owner", "coordinate_with", "data_date", "run_date",
+    "owner", "coordinate_with", "data_date",
 ]
 
 
@@ -455,7 +459,7 @@ def summarise(skus: pd.DataFrame, context: dict, check_counts: dict, cfg: dict =
 
 
 def build_action_list(
-    skus: pd.DataFrame, data_date: str, run_date: str, cfg: dict = CONFIG
+    skus: pd.DataFrame, data_date: str, cfg: dict = CONFIG
 ) -> pd.DataFrame:
     """One row per SKU with a primary action, in the order of the recommendations."""
     rows = flagged_in_order(skus)
@@ -471,13 +475,20 @@ def build_action_list(
     rows["owner"] = OWNER
     rows["coordinate_with"] = rows["rule"].map(lambda rule: RULES[rule]["coordinate_with"])
     rows["data_date"] = data_date
-    rows["run_date"] = run_date
     return rows[ACTION_LIST_COLUMNS].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
-# 5. HTML report: one self-contained file, no external assets
+# 5. HTML report: one self-contained file with tabs, no external assets
 # ---------------------------------------------------------------------------
+REPORT_TITLE = "Zenline category review"
+CATEGORY_NAME = "Hair Coloration"
+AUTHOR_LINE = (
+    "Prepared by Catherine Xu as a take-home exercise for Zenline AI, "
+    "using the synthetic dataset provided."
+)
+METHOD_FILE = "assumptions_and_calculations.md"
+
 STAGES = {
     "R1": "Fix the existing range",
     "R4": "Fix the existing range",
@@ -485,23 +496,43 @@ STAGES = {
     "R2": "Change the range",
     "R3": "Grow",
 }
+KEYWORDS = {"R1": "Restock", "R4": "Price", "R5": "Delist", "R2": "Relist", "R3": "Promote"}
 SHORT_LABELS = {  # column headers and filter buttons
     "R1": "Restock", "R4": "Review price", "R5": "Delist or mark down",
     "R2": "Relist", "R3": "Promote",
 }
+DECISIONS_ASKED = {  # what each action asks the decision maker for
+    "R1": "Reorder now and confirm delivery dates.",
+    "R4": "Agree a price test on these products.",
+    "R5": "Approve the delist and markdown list.",
+    "R2": "Approve the relist list.",
+    "R3": "Agree placement and promotion slots.",
+}
 STOCK_LABELS = {"in_stock": "In stock", "low_stock": "Low stock", "out_of_stock": "Out of stock"}
 STATUS_LABELS = {"aktiv": "Active", "inaktiv": "Inactive"}
 
-# DECISIONS.md section 6
+# DECISIONS.md section 6: the question, and why the answer matters
 OPEN_QUESTIONS = [
-    "What does the status \"inaktiv\" mean in practice? We read it as being phased out "
-    "while the remaining stock sells down.",
-    "How is the sales trend calculated? We use it as a direction only and never derive "
-    "euro figures from it.",
-    "Do inactive products still occupy the shelf space listed for them? If they do, "
-    "relisting needs no new space.",
-    "Is there a minimum revenue per product per week that should replace the "
-    "bottom-quarter cut-off used for delisting?",
+    (
+        "What does the status \"inaktiv\" mean in practice?",
+        "We read it as being phased out while the remaining stock sells down. The answer "
+        "decides whether the relist candidates of action 4 are really off the shelf.",
+    ),
+    (
+        "How is the sales trend calculated?",
+        "All five actions use the trend as a direction. A different basis could move "
+        "products across the thresholds.",
+    ),
+    (
+        "Do inactive products still occupy the shelf space listed for them?",
+        "If they do, relisting needs no new space and action 3 is not a precondition "
+        "for action 4.",
+    ),
+    (
+        "Is there a minimum revenue per product per week?",
+        "It would replace the bottom-quarter cut-off used for delisting in action 3 with "
+        "the retailer's own standard.",
+    ),
 ]
 
 
@@ -528,13 +559,18 @@ def long_date(iso_date: str) -> str:
 
 
 def check_flag(row: pd.Series) -> str:
+    """Marker for a product with an open data point. Links to the open points tab."""
     if not row["verify_first"]:
         return ""
-    return f'<span class="flag" title="{esc(row["verify_reason"])}">! Check first</span>'
+    return f'<a class="flag" href="#open" title="{esc(row["verify_reason"])}">! Check first</a>'
+
+
+def slug(rule: str) -> str:
+    return KEYWORDS[rule].lower()
 
 
 def recommendation_texts(skus: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> dict:
-    """Headline, estimate and reasoning for each recommendation, in business language."""
+    """Driver, headline, estimate and reasoning for each action, in business language."""
     rules = summary["rules"]
     number = {rule: n for n, rule in enumerate(cfg["report_order"], start=1)}
 
@@ -547,51 +583,48 @@ def recommendation_texts(skus: pd.DataFrame, summary: dict, cfg: dict = CONFIG) 
             f" {len(r4_elsewhere)} more low-margin products are handled first under "
             f"actions {where}."
         )
-    gap_note = ""
-    if summary["price_gap_notes"]:
-        gap_note = (
-            f" {summary['price_gap_notes']} products with an exact competitor match are "
-            f"priced more than {pct(cfg['r4b_price_gap'])} away from that competitor."
-        )
 
     def check_note(rule: str) -> str:
-        """Say how much of an estimate rests on products whose figures need checking."""
+        """Say how much of an estimate rests on products with an open data point."""
         info = rules[rule]
         if not info["verify_first"]:
             return ""
         return (
             f" {info['verify_first']} of them, carrying {eur(info['verify_impact_eur'])} of the "
-            "estimate, need a check first because their sales figures do not add up."
+            "estimate, have an open data point to clarify first."
         )
 
-    return {
+    texts = {
         "R1": {
+            "driver": f"{rules['R1']['skus']} products in growing markets are out of stock",
             "title": f"Restock {rules['R1']['skus']} out-of-stock products",
-            "figure": eur(rules["R1"]["impact_eur"]),
             "figure_label": "12-week revenue at risk",
             "why": "These products are active and out of stock while their market is "
             "growing. This is revenue the range already earns, so it comes first.",
         },
         "R4": {
+            "driver": f"{rules['R4']['skus']} growing products earn a margin below "
+            f"{pct(cfg['r4_margin_max'])}",
             "title": f"Review the price of {rules['R4']['skus']} low-margin products",
-            "figure": eur(rules["R4"]["impact_eur"]),
             "figure_label": f"extra revenue from a {pct(cfg['r4_price_increase'])} price increase",
             "why": f"Margin is below {pct(cfg['r4_margin_max'])} while sales grow both in our "
-            f"channel and in the market, which leaves room to test a higher price.{r4_note}{gap_note}",
+            f"channel and in the market, which leaves room to test a higher price.{r4_note}",
         },
         "R5": {
+            "driver": f"{rules['R5']['skus']} products with low and falling sales occupy "
+            f"{summary['shelf_freed_now_cm'] + summary['shelf_freed_later_cm']} cm of shelf",
             "title": f"Delist {summary['delist_count']} products and mark down "
             f"{summary['markdown_count']} seasonal ones",
-            "figure": eur(rules["R5"]["impact_eur"]),
             "figure_label": f"revenue given up, for {summary['shelf_freed_now_cm']} cm of shelf "
             f"now and {summary['shelf_freed_later_cm']} cm later",
-            "why": "Their revenue is in the bottom quarter of the range (below "
-            f"{eur(summary['r5_revenue_cutoff'])} in 12 weeks) and sales are falling both in our "
-            "channel and in the market. Seasonal products are marked down, not delisted.",
+            "why": "Their revenue is in the bottom quarter of the range and sales are falling "
+            "both in our channel and in the market. Seasonal products are marked down, not "
+            "delisted.",
         },
         "R2": {
+            "driver": f"{rules['R2']['skus']} inactive products sit in markets growing by more "
+            f"than {pct(cfg['r2_market_trend_min'])}",
             "title": f"Relist {rules['R2']['skus']} inactive products",
-            "figure": eur(rules["R2"]["impact_eur"]),
             "figure_label": "incremental revenue",
             "why": f"These products are inactive, yet their market grew by more than "
             f"{pct(cfg['r2_market_trend_min'])}. Relisting them needs "
@@ -599,18 +632,27 @@ def recommendation_texts(skus: pd.DataFrame, summary: dict, cfg: dict = CONFIG) 
             f"{summary['shelf_freed_now_cm']} cm now.{check_note('R2')}",
         },
         "R3": {
+            "driver": f"{rules['R3']['skus']} products in growing markets hold less than half "
+            "our average share",
             "title": f"Promote {rules['R3']['skus']} products with strong demand and a weak share",
-            "figure": eur(rules["R3"]["impact_eur"]),
             "figure_label": "incremental revenue",
             "why": f"The market for these products grew by more than "
             f"{pct(cfg['r3_market_trend_min'])}, but our share is below half of our "
             f"{pct(summary['avg_share'], digits=1)} average.{check_note('R3')}",
         },
     }
+    for rule, text in texts.items():
+        info = rules[rule]
+        text["figure"] = eur(info["impact_eur"])
+        text["decision"] = DECISIONS_ASKED[rule]
+        # An estimate is provisional when open data points carry a material part of it
+        open_share = info["verify_impact_eur"] / info["impact_eur"] if info["impact_eur"] else 0
+        text["provisional"] = open_share >= cfg["provisional_share_min"]
+    return texts
 
 
 def rule_method(rule: str, summary: dict, cfg: dict = CONFIG) -> dict:
-    """How each recommendation was found: rule, fields used, estimate formula."""
+    """How each action was found: rule, fields used, estimate formula. For the method file."""
     gap_formula = (
         f"Market revenue × our average share ({pct(summary['avg_share'], digits=1)}) − current "
         "revenue, never below zero. It is the revenue we would add by reaching our average share."
@@ -661,44 +703,79 @@ def rule_method(rule: str, summary: dict, cfg: dict = CONFIG) -> dict:
     return methods[rule]
 
 
-def bar_note(rule: str, row: pd.Series) -> str:
-    """The one piece of evidence shown beside each bar."""
-    market = f"market {pct(row['market_sales_trend_12w_pct'], signed=True)}"
-    notes = {
-        "R1": market.capitalize(),
-        "R4": f"Margin {pct(row['channel_margin_pct'], digits=1)}",
-        "R5": f"{row['action']}, frees {row['shelf_space_cm']} cm",
-        "R2": f"{market.capitalize()}, needs {row['shelf_space_cm']} cm",
-        "R3": f"Share {pct(row['share'], digits=1)}, {market}",
-    }
-    return notes[rule]
+def threshold_rows(summary: dict, cfg: dict = CONFIG) -> list[tuple[str, str]]:
+    return [
+        ("Our average share of the tracked market", pct(summary["avg_share"], digits=1)),
+        ("Restock: market trend above", pct(cfg["r1_market_trend_min"])),
+        ("Price review: margin below", pct(cfg["r4_margin_max"])),
+        ("Price review: price increase used in the estimate", pct(cfg["r4_price_increase"])),
+        ("Price gap note: price differs from the competitor by more than", pct(cfg["r4b_price_gap"])),
+        ("Delist or mark down: revenue in the bottom", f"{pct(cfg['r5_revenue_quantile'])} of all "
+         f"products, which is below {eur(summary['r5_revenue_cutoff'])} in this data"),
+        ("Relist: market trend above", pct(cfg["r2_market_trend_min"], signed=True)),
+        ("Promote: market trend above", pct(cfg["r3_market_trend_min"], signed=True)),
+        ("Promote: share below", f"{pct(cfg['r3_share_factor'])} of the average share"),
+        ("Watchlist: low stock and market trend above", pct(cfg["watch_market_trend_min"], signed=True)),
+        ("Estimate shown as provisional when open data points carry at least",
+         f"{pct(cfg['provisional_share_min'])} of it"),
+    ]
 
 
-def bars_html(rule: str, rows: pd.DataFrame) -> str:
-    """Horizontal bars, one per SKU, sized by the estimate. Hover shows the evidence."""
-    top = rows["impact_eur"].max() or 1
+# --- Building blocks ---------------------------------------------------------
+def row_tooltip(row: pd.Series) -> str:
+    return (
+        f"{row['product_id']} {row['product_name']}: revenue {eur(row['channel_revenue_eur_12w'])}, "
+        f"margin {pct(row['channel_margin_pct'], digits=1)}, "
+        f"trend in our channel {pct(row['channel_sales_trend_12w_pct'], signed=True)}, "
+        f"market trend {pct(row['market_sales_trend_12w_pct'], signed=True)}, "
+        f"share {pct(row['share'], digits=1)}"
+    )
+
+
+def product_cell(row: pd.Series) -> str:
+    stock = STOCK_LABELS.get(row["stock_status"], row["stock_status"])
+    return (
+        f'<td><span class="sku-id">{esc(row["product_id"])}</span> {esc(row["product_name"])}'
+        f'<br><span class="sub">{esc(row["subcategory"])}, {esc(stock.lower())}</span></td>'
+    )
+
+
+def bar_cell(value: float, top: float) -> str:
+    """A euro value with a thin bar under it, sized against the largest value in the table."""
+    return (
+        f'<td class="num barcell"><strong>{eur(value)}</strong>'
+        f'<i style="--r:{(value / top if top else 0):.4f}"></i></td>'
+    )
+
+
+def bars_html(items: list[dict]) -> str:
+    """Horizontal bars. Each item: label (html), value, value_text, note (html), tooltip."""
+    top = max(item["value"] for item in items) or 1
     parts = []
-    for _, row in rows.iterrows():
-        tooltip = (
-            f"{row['product_id']} {row['product_name']}: revenue {eur(row['channel_revenue_eur_12w'])}, "
-            f"margin {pct(row['channel_margin_pct'], digits=1)}, "
-            f"trend in our channel {pct(row['channel_sales_trend_12w_pct'], signed=True)}, "
-            f"market trend {pct(row['market_sales_trend_12w_pct'], signed=True)}, "
-            f"share {pct(row['share'], digits=1)}"
-        )
-        gap = ""
-        if row["price_gap_note"]:
-            gap = f' <span class="flag flag-info" title="{esc(row["price_gap_note"])}">Price gap</span>'
+    for item in items:
         parts.append(
-            f'<div class="bar-row" title="{esc(tooltip)}">'
-            f'<div class="bar-label"><span class="sku-id">{esc(row["product_id"])}</span> '
-            f'{esc(row["product_name"])}</div>'
-            f'<div class="bar-track"><div class="bar-fill" style="--r:{row["impact_eur"] / top:.4f}"></div>'
-            f'<span class="bar-value">{eur(row["impact_eur"])}</span></div>'
-            f'<div class="bar-note">{esc(bar_note(rule, row))} {check_flag(row)}{gap}</div>'
-            "</div>"
+            f'<div class="bar-row" title="{esc(item.get("tooltip", ""))}">'
+            f'<div class="bar-label">{item["label"]}</div>'
+            f'<div class="bar-track"><div class="bar-fill {item.get("css", "")}" '
+            f'style="--r:{item["value"] / top:.4f}"></div>'
+            f'<span class="bar-value">{esc(item["value_text"])}</span></div>'
+            f'<div class="bar-note">{item.get("note", "")}</div></div>'
         )
     return '<div class="bars">' + "".join(parts) + "</div>"
+
+
+def product_bars(rows: pd.DataFrame, note) -> str:
+    """One bar per product, sized by its estimate. `note` builds the text beside the bar."""
+    return bars_html([
+        {
+            "label": f'<span class="sku-id">{esc(row["product_id"])}</span> {esc(row["product_name"])}',
+            "value": row["impact_eur"],
+            "value_text": eur(row["impact_eur"]),
+            "note": f"{esc(note(row))} {check_flag(row)}",
+            "tooltip": row_tooltip(row),
+        }
+        for _, row in rows.iterrows()
+    ])
 
 
 def shelf_html(summary: dict) -> str:
@@ -762,9 +839,8 @@ def scatter_svg(skus: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> str:
         out.append(f'<line x1="{left}" x2="{plot_right}" y1="{yy:.1f}" y2="{yy:.1f}" class="grid"/>')
         out.append(f'<text x="{left - 8}" y="{yy + 4:.1f}" text-anchor="end">{step}%</text>')
     for step in range(int(round(x_min * 100)), int(round(x_max * 100)) + 1, 20):
-        xx = x(step / 100)
         out.append(
-            f'<text x="{xx:.1f}" y="{height - bottom + 18}" text-anchor="middle">'
+            f'<text x="{x(step / 100):.1f}" y="{height - bottom + 18}" text-anchor="middle">'
             f'{pct(step / 100, signed=True)}</text>'
         )
     out.append(f'<text x="{left}" y="12" class="axis-title">Our share of the product\'s market</text>')
@@ -801,7 +877,7 @@ def scatter_svg(skus: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> str:
         )
 
     out.extend(dot(row, "dot-other", 3.5) for _, row in others.iterrows())
-    out.extend(dot(row, "dot-promote", 5.5) for _, row in promote.iterrows())
+    out.extend(dot(row, "dot-pick", 5.5) for _, row in promote.iterrows())
     out.append("</svg>")
     legend = (
         '<p class="legend">'
@@ -809,25 +885,76 @@ def scatter_svg(skus: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> str:
         f'<span><i class="sw sw-other sw-dot"></i>Other active products in stock ({len(others)})</span>'
         "</p>"
     )
-    return f'<figure class="chart">{legend}{"".join(out)}</figure>'
+    return f'<div class="chart">{legend}{"".join(out)}</div>'
+
+
+def margin_strip_svg(skus: pd.DataFrame, median: float, cfg: dict = CONFIG) -> str:
+    """Every active product placed by its margin; price review candidates highlighted."""
+    active = skus[skus["status"] == cfg["status_active"]].sort_values("channel_margin_pct")
+    picked = active["rule"] == "R4"
+    col = "channel_margin_pct"
+    width, left, right, bin_width, step = 860, 24, 24, 0.008, 9
+    lo = math.floor(active[col].min() * 20) / 20
+    hi = math.ceil(active[col].max() * 20) / 20
+
+    def x(value: float) -> float:
+        return left + (value - lo) / (hi - lo) * (width - left - right)
+
+    # Stack dots that fall into the same narrow margin band
+    level, levels = {}, []
+    for value in active[col]:
+        key = int((value - lo) / bin_width)
+        levels.append(level.get(key, 0))
+        level[key] = level.get(key, 0) + 1
+    base = 44 + max(levels) * step
+    height = base + 34
+    out = [
+        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="Margin of every active '
+        'product. Price review candidates sit below the threshold.">'
+    ]
+    out.append(f'<line x1="{left}" x2="{width - right}" y1="{base + 8}" y2="{base + 8}" class="ref"/>')
+    for tick in range(int(round(lo * 100)), int(round(hi * 100)) + 1, 10):
+        out.append(f'<text x="{x(tick / 100):.1f}" y="{base + 26}" text-anchor="middle">{tick}%</text>')
+    for value, label, anchor in [
+        (cfg["r4_margin_max"], f"Price review below {pct(cfg['r4_margin_max'])}", "start"),
+        (median, f"Median of active products {pct(median, digits=1)}", "start"),
+    ]:
+        out.append(f'<line x1="{x(value):.1f}" x2="{x(value):.1f}" y1="18" y2="{base + 8}" class="ref"/>')
+        out.append(
+            f'<text x="{x(value) + 6:.1f}" y="14" text-anchor="{anchor}" class="ref-label">{esc(label)}</text>'
+        )
+    for (_, row), stacked, is_picked in zip(active.iterrows(), levels, picked):
+        tip = (
+            f"{row['product_id']} {row['product_name']}: margin {pct(row[col], digits=1)}, "
+            f"revenue {eur(row['channel_revenue_eur_12w'])}"
+        )
+        css, radius = ("dot-pick", 5) if is_picked else ("dot-other", 3.5)
+        out.append(
+            f'<circle cx="{x(row[col]):.1f}" cy="{base - stacked * step}" r="{radius}" class="{css}">'
+            f"<title>{esc(tip)}</title></circle>"
+        )
+    out.append("</svg>")
+    legend = (
+        '<p class="legend">'
+        f'<span><i class="sw sw-now sw-dot"></i>Price review candidates ({int(picked.sum())})</span>'
+        f'<span><i class="sw sw-other sw-dot"></i>Other active products ({int((~picked).sum())})</span>'
+        "</p>"
+    )
+    return f'<div class="chart">{legend}{"".join(out)}</div>'
 
 
 def price_gap_table(skus: pd.DataFrame) -> str:
     rows = skus[skus["price_gap_note"] != ""]
-    if rows.empty:
-        return ""
     body = "".join(
-        f"<tr><td>{esc(row['product_id'])} {esc(row['product_name'])}</td>"
+        f"<tr><td><span class='sku-id'>{esc(row['product_id'])}</span> {esc(row['product_name'])}</td>"
         f"<td class='num'>€{row['price_eur']:.2f}</td>"
         f"<td class='num'>€{row['competitor_price_eur']:.2f}</td>"
         f"<td>{esc(row['competitor_source'])}</td>"
         f"<td class='num'>{pct(row['price_gap_pct'], signed=True)}</td>"
-        f"<td>{esc(row['action'])} (action {int(row['recommendation'])})</td></tr>"
+        f"<td>{int(row['recommendation'])}. {esc(row['action'])}</td></tr>"
         for _, row in rows.iterrows()
     )
     return (
-        "<p>Price gaps against an exact competitor match. These are notes for the price "
-        "review and do not change the product's own action.</p>"
         '<div class="table-wrap"><table><thead><tr><th>Product</th><th class="num">Our price</th>'
         '<th class="num">Competitor price</th><th>Seen at</th><th class="num">Gap</th>'
         "<th>Its own action</th></tr></thead><tbody>" + body + "</tbody></table></div>"
@@ -860,6 +987,478 @@ def subcategory_table(skus: pd.DataFrame, cfg: dict = CONFIG) -> str:
         '<th class="num wrap">Revenue, 12 weeks</th><th class="num wrap">Share of market</th>'
         f"{header}</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
     )
+
+
+def learning(number: int, title: str, body: str, points: list[str], data_date: str) -> str:
+    """One learning: the takeaway as the title, the exhibit, then the supporting points."""
+    items = "".join(f"<li>{point}</li>" for point in points if point)
+    return (
+        f'<section class="learning"><p class="exhibit-no">Exhibit {number}</p>'
+        f"<h3>{esc(title)}</h3>{body}"
+        f'<ul class="plain">{items}</ul>'
+        f'<p class="source">Source: sales and market data provided, 12 weeks to {long_date(data_date)}.</p>'
+        "</section>"
+    )
+
+
+def span_text(values: pd.Series, signed: bool = False, digits: int = 0) -> str:
+    """'21% to 53%' for a set of values."""
+    return f"{pct(values.min(), signed, digits)} to {pct(values.max(), signed, digits)}"
+
+
+# --- The product table of each action ------------------------------------------
+def action_products_table(rule: str, rows: pd.DataFrame, cfg: dict = CONFIG) -> str:
+    """The products to act on, with the few figures that explain why."""
+    number = {r: n for n, r in enumerate(cfg["report_order"], start=1)}
+    top = rows["impact_eur"].max() or 1
+
+    def trend(column: str):
+        return lambda row: f'<td class="num">{pct(row[column], signed=True)}</td>'
+
+    def money(column: str):
+        return lambda row: f'<td class="num">{eur(row[column])}</td>'
+
+    ours, market = trend("channel_sales_trend_12w_pct"), trend("market_sales_trend_12w_pct")
+    estimate = lambda row: bar_cell(row["impact_eur"], top)  # noqa: E731
+    columns = {
+        "R1": [("Market trend", market), ("Our sales trend", ours), ("Revenue at risk", estimate)],
+        "R4": [
+            ("Margin", lambda row: f'<td class="num">{pct(row["channel_margin_pct"], digits=1)}</td>'),
+            ("Our sales trend", ours), ("Market trend", market),
+            ("Revenue, 12 weeks", money("channel_revenue_eur_12w")), ("Estimate", estimate),
+        ],
+        "R5": [
+            ("Action", lambda row: f'<td class="nowrap">{esc(row["action"])}</td>'),
+            ("Our sales trend", ours), ("Market trend", market),
+            ("Shelf freed", lambda row: f'<td class="num">{row["shelf_space_cm"]} cm</td>'),
+            ("Revenue given up", estimate),
+        ],
+        "R2": [
+            ("Market trend", market), ("Market revenue, 12 weeks", money("market_revenue_eur_12w")),
+            ("Our revenue, 12 weeks", money("channel_revenue_eur_12w")),
+            ("Shelf needed", lambda row: f'<td class="num">{row["shelf_space_cm"]} cm</td>'),
+            ("Estimate", estimate),
+        ],
+        "R3": [
+            ("Our share", lambda row: f'<td class="num">{pct(row["share"], digits=1)}</td>'),
+            ("Market trend", market), ("Our revenue, 12 weeks", money("channel_revenue_eur_12w")),
+            ("Estimate", estimate),
+        ],
+    }[rule]
+
+    head = "<th>Product</th>" + "".join(
+        f'<th class="{"" if name == "Action" else "num wrap"}">{name}</th>' for name, _ in columns
+    ) + "<th>Note</th>"
+    body = []
+    for _, row in rows.iterrows():
+        notes = [check_flag(row)] if row["verify_first"] else []
+        if row["price_gap_note"]:
+            notes.append(f'Price gap: {esc(row["price_gap_note"].replace("EUR ", "€"))}')
+        for other in row["rules_triggered"].split(", "):
+            if other != row["rule"]:
+                notes.append(f"Also a candidate for action {number[other]}")
+        if row["watchlist"]:
+            notes.append("Low on stock")
+        cells = "".join(cell(row) for _, cell in columns)
+        body.append(
+            f'<tr title="{esc(row_tooltip(row))}">{product_cell(row)}{cells}'
+            f'<td>{"<br>".join(notes)}</td></tr>'
+        )
+    return (
+        f'<div class="table-wrap"><table class="action-products"><thead><tr>{head}</tr></thead>'
+        f"<tbody>{''.join(body)}</tbody></table></div>"
+    )
+
+
+def watchlist_section(skus: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> str:
+    watch = skus[skus["watchlist"]].sort_values("channel_revenue_eur_12w", ascending=False)
+    rows = "".join(
+        f'<tr title="{esc(row_tooltip(row))}">{product_cell(row)}'
+        f"<td class='num'>{pct(row['market_sales_trend_12w_pct'], signed=True)}</td>"
+        f"<td class='num'>{pct(row['channel_sales_trend_12w_pct'], signed=True)}</td>"
+        f"<td class='num'>{eur(row['channel_revenue_eur_12w'])}</td>"
+        f"<td>{esc(str(int(row['recommendation'])) + '. ' + row['action']) if row['rule'] else 'None yet'}</td></tr>"
+        for _, row in watch.iterrows()
+    )
+    return (
+        "<h3>Watchlist: low on stock in growing markets</h3>"
+        f"<p>No action yet. These {summary['watchlist_count']} active products are low on stock "
+        f"while their market grows by more than {pct(cfg['watch_market_trend_min'])}. Together "
+        f"they earned {eur(summary['watchlist_revenue'])} in 12 weeks, so they are the next "
+        "restock candidates if stock runs out.</p>"
+        '<div class="table-wrap"><table><thead><tr><th>Product</th><th class="num wrap">Market trend</th>'
+        '<th class="num wrap">Our sales trend</th><th class="num wrap">Revenue, 12 weeks</th>'
+        f"<th>Current action</th></tr></thead><tbody>{rows}</tbody></table></div>"
+    )
+
+
+# --- What we learned, per action ---------------------------------------------
+def learnings_html(
+    rule: str, skus: pd.DataFrame, summary: dict, data_date: str, cfg: dict = CONFIG
+) -> str:
+    """Two learnings per action. Every figure in the wording is computed from the data."""
+    rules = summary["rules"]
+    group = flagged_in_order(skus)
+    group = group[group["rule"] == rule]
+    info = rules[rule]
+    active = skus[skus["status"] == cfg["status_active"]]
+    market = "market_sales_trend_12w_pct"
+
+    def market_note(row: pd.Series) -> str:
+        return f"Market {pct(row[market], signed=True)}"
+
+    if rule == "R1":
+        lead_count = min(3, len(group))
+        lead_share = group["impact_eur"].head(lead_count).sum() / info["impact_eur"]
+        points = [
+            f"All {len(group)} products sit in growing markets, with market sales trends of "
+            f"{span_text(group[market], signed=True)}.",
+        ]
+        for _, row in group[group["price_gap_note"] != ""].iterrows():
+            points.append(
+                f"{esc(row['product_id'])} {esc(row['product_name'])} is also priced at "
+                f"{esc(row['price_gap_note'].replace('EUR ', '€'))}. Restock it first, then "
+                "review its price under action 2."
+            )
+        first = learning(
+            1, f"{lead_count} products carry {pct(lead_share)} of the revenue at risk",
+            product_bars(group, market_note), points, data_date,
+        )
+        second = learning(
+            2,
+            f"Low stock is the next risk: {summary['watchlist_count']} more products with "
+            f"{eur(summary['watchlist_revenue'])} of revenue",
+            bars_html([
+                {"label": f"Out of stock now ({info['skus']} products)", "value": info["impact_eur"],
+                 "value_text": eur(info["impact_eur"]), "note": "Action 1"},
+                {"label": f"Low on stock, market growing ({summary['watchlist_count']} products)",
+                 "value": summary["watchlist_revenue"], "css": "fill-light",
+                 "value_text": eur(summary["watchlist_revenue"]), "note": "Watchlist"},
+            ]),
+            ["The low-stock products are listed in the watchlist. None needs action yet, but "
+             "they hold more revenue than the products already out of stock."],
+            data_date,
+        )
+        return first + second
+
+    if rule == "R4":
+        median = active["channel_margin_pct"].median()
+        elsewhere = skus[(skus["rule"] != "R4") & skus["rules_triggered"].str.contains("R4")]
+        gaps = skus[skus["price_gap_note"] != ""]
+        first = learning(
+            1,
+            f"The {len(group)} products earn margins of "
+            f"{span_text(group['channel_margin_pct'], digits=1)}, against a median of "
+            f"{pct(median, digits=1)}",
+            margin_strip_svg(skus, median, cfg),
+            [
+                f"All {len(group)} are growing both in our channel and in the market, so demand "
+                "is not the constraint.",
+                f"{len(elsewhere)} more products meet the same conditions but are restocked or "
+                "promoted first. Their price can be reviewed in the same round."
+                if len(elsewhere) else "",
+            ],
+            data_date,
+        )
+        second = ""
+        if len(gaps):
+            gap_list = " and ".join(pct(v, signed=True) for v in gaps["price_gap_pct"])
+            second = learning(
+                2, f"Where prices can be compared like for like, the gaps are large: {gap_list}",
+                price_gap_table(skus),
+                [
+                    f"Only {len(gaps)} products have an exact match in the competitor data, so "
+                    "this is a signal to follow up, not a price benchmark.",
+                    "Both products have their own action. The price gap is a note for the "
+                    "price review.",
+                ],
+                data_date,
+            )
+        return first + second
+
+    if rule == "R5":
+        shelf = group["shelf_space_cm"].sum()
+        shelf_share = shelf / active["shelf_space_cm"].sum()
+        revenue_share = info["impact_eur"] / active["channel_revenue_eur_12w"].sum()
+        first = learning(
+            1,
+            f"These {len(group)} products hold {pct(shelf_share, digits=1)} of the shelf and bring "
+            f"{pct(revenue_share, digits=1)} of the revenue",
+            bars_html([
+                {"label": "Share of shelf space, active products", "value": shelf_share,
+                 "value_text": pct(shelf_share, digits=1), "note": f"{shelf} cm"},
+                {"label": "Share of revenue, active products", "value": revenue_share,
+                 "css": "fill-light", "value_text": pct(revenue_share, digits=1),
+                 "note": eur(info["impact_eur"])},
+            ]),
+            [
+                "Sales are falling both in our channel and in the market for every one of them.",
+                f"{summary['markdown_count']} are seasonal. They are marked down instead of "
+                "delisted, and their shelf space frees up once they have sold through.",
+            ],
+            data_date,
+        )
+        second = learning(
+            2,
+            f"Delisting frees {summary['shelf_freed_now_cm']} cm now and "
+            f"{summary['shelf_freed_later_cm']} cm later, against {summary['shelf_needed_cm']} cm "
+            "needed for relisting",
+            shelf_html(summary),
+            ["Actions 3 and 4 work as a pair. This holds only if inactive products no longer "
+             'occupy their shelf space, which is an <a href="#open">open point</a>.'],
+            data_date,
+        )
+        return first + second
+
+    if rule == "R2":
+        inactive = skus[skus["status"] == cfg["status_inactive"]]
+        selling = inactive[inactive["channel_revenue_eur_12w"] > 0]
+        points = [
+            f"{len(selling)} of the {len(inactive)} inactive products still recorded sales in "
+            f"the period, {eur(selling['channel_revenue_eur_12w'].sum())} in total.",
+        ]
+        at_average = int((group["impact_eur"] == 0).sum())
+        if at_average:
+            points.append(
+                f"{at_average} of the {len(group)} candidates already sell at or above our "
+                "average share while inactive, so their estimate is zero. Whether they are "
+                'really off the shelf is an <a href="#open">open point</a>.'
+            )
+        if info["verify_first"]:
+            points.append(
+                f"{info['verify_first']} products carry {eur(info['verify_impact_eur'])} of the "
+                f"{eur(info['impact_eur'])} estimate and have an "
+                '<a href="#open">open data point</a>, so the estimate is provisional.'
+            )
+        for _, row in group[group["price_gap_note"] != ""].iterrows():
+            points.append(
+                f"{esc(row['product_id'])} {esc(row['product_name'])} was priced at "
+                f"{esc(row['price_gap_note'].replace('EUR ', '€'))}. Check the price before relisting."
+            )
+        first = learning(
+            1,
+            f"Inactive does not mean no demand: the {len(group)} candidates sit in markets "
+            f"growing by {span_text(group[market])}",
+            product_bars(group, market_note), points, data_date,
+        )
+        second = learning(
+            2,
+            f"Relisting needs {summary['shelf_needed_cm']} cm of shelf, and delisting frees "
+            f"{summary['shelf_freed_now_cm']} cm now",
+            shelf_html(summary),
+            ["The remaining space becomes available once the marked-down products of action 3 "
+             "have sold through."],
+            data_date,
+        )
+        return first + second
+
+    # R3
+    points = [
+        f"Our average share is {pct(summary['avg_share'], digits=1)}. These products hold "
+        f"{span_text(group['share'], digits=1)}.",
+    ]
+    second_points = []
+    if info["verify_first"]:
+        second_points.append(
+            f"{info['verify_first']} of the {len(group)} have an "
+            '<a href="#open">open data point</a>: they recorded no sales, or sales that do not '
+            "add up, while being listed. That points to a listing or availability problem to fix "
+            "before promoting."
+        )
+    first = learning(
+        1,
+        f"{len(group)} products sit in growing markets with less than half our average share",
+        scatter_svg(skus, summary, cfg), points, data_date,
+    )
+    second = learning(
+        2, f"Reaching our average share on these products would add {eur(info['impact_eur'])}",
+        product_bars(group, lambda row: f"Share {pct(row['share'], digits=1)}"),
+        second_points, data_date,
+    )
+    return first + second
+
+
+# --- The tabs ------------------------------------------------------------------
+def info_tab(summary: dict, data_date: str, cfg: dict = CONFIG) -> str:
+    return f"""
+<h1>How to use this review</h1>
+<p class="lead">This review covers the {CATEGORY_NAME} category: {summary['sku_count']} products and
+12 weeks of sales to {long_date(data_date)}. It answers two questions: which products need
+attention, and what to do next.</p>
+<dl class="facts">
+<div><dt>Products reviewed</dt><dd>{summary['sku_count']} <small>{summary['active_count']} active,
+{summary['inactive_count']} inactive</small></dd></div>
+<div><dt>Our revenue, 12 weeks</dt><dd>{eur(summary['channel_revenue'])}</dd></div>
+<div><dt>Our share of the tracked market</dt><dd>{pct(summary['avg_share'], digits=1)}</dd></div>
+<div><dt>Products with an action</dt><dd>{summary['action_count']} <small>in five actions</small></dd></div>
+</dl>
+<h2>What each tab contains</h2>
+<div class="table-wrap"><table class="guide"><thead><tr><th>Tab</th><th>What you find there</th>
+<th>Use it to</th></tr></thead><tbody>
+<tr><td><a href="#summary">Executive summary</a></td><td>What drives the review and the five actions,
+with the decision each one needs.</td><td>Brief your VP and agree priorities.</td></tr>
+<tr><td><a href="#actions">Actions</a></td><td>One page per action. First the products to act on,
+then what we learned, with the supporting charts.</td><td>Work through an action with your team.</td></tr>
+<tr><td><a href="#open">Open points to clarify</a></td><td>Data points to confirm and questions to
+answer before acting.</td><td>Agree who clarifies what.</td></tr>
+<tr><td><a href="#list">Full action list</a></td><td>All {summary['action_count']} products with an
+action in one table, with a filter per action.</td><td>Look up a product or hand over the list.</td></tr>
+</tbody></table></div>
+<h2>How to navigate</h2>
+<ul class="plain">
+<li>Use the tabs at the top to move between sections. Inside Actions, pick an action by its keyword.</li>
+<li>Actions are numbered in the order to carry them out: fix the range you have, then change it,
+then grow it.</li>
+<li>Hover over a product row or a chart mark to see its full figures.</li>
+<li>Products marked "Check first" have an open data point. The marker takes you to it.</li>
+<li>To print or save as PDF, use the print function of your browser. All tabs print in order.</li>
+</ul>
+<h2>How to read the figures</h2>
+<ul class="plain">
+<li>Euro figures are estimates for a 12-week period. They measure different things, so they are
+shown side by side and not added up.</li>
+<li>Each product appears under one action only.</li>
+<li>"Provisional" marks an estimate that depends on open data points.</li>
+<li>The product list is also available as <code>action_list.csv</code>. Assumptions and calculations
+are documented in <code>{METHOD_FILE}</code>. Both sit next to this file.</li>
+</ul>
+"""
+
+
+def summary_tab(skus: pd.DataFrame, summary: dict, texts: dict, cfg: dict = CONFIG) -> str:
+    rules = summary["rules"]
+    order = cfg["report_order"]
+    largest = max(info["impact_eur"] for info in rules.values()) or 1
+
+    rows, seen_stages, any_provisional = [], set(), False
+    for number, rule in enumerate(order, start=1):
+        info, text = rules[rule], texts[rule]
+        stage_cell = ""
+        if STAGES[rule] not in seen_stages:
+            seen_stages.add(STAGES[rule])
+            span = sum(1 for other in order if STAGES[other] == STAGES[rule])
+            stage_cell = f'<td class="stage-cell" rowspan="{span}">{esc(STAGES[rule])}</td>'
+        partner = RULES[rule]["coordinate_with"].split(": ", 1)[0].lower()
+        provisional = ""
+        if text["provisional"]:
+            any_provisional = True
+            provisional = ' <a class="flag" href="#open">Provisional</a>'
+        meter_class = "meter cost" if rule == "R5" else "meter"
+        rows.append(
+            f"<tr>{stage_cell}"
+            f"<td>{esc(text['driver'])}</td>"
+            f'<td><div class="action-name"><span class="n">{number}</span>'
+            f'<a href="#actions-{slug(rule)}">{esc(text["title"])}</a></div></td>'
+            f'<td>{esc(text["decision"])}<br><span class="sub">With {esc(partner)}</span></td>'
+            f'<td><div class="figure">{text["figure"]}{provisional}</div>'
+            f'<p class="figure-label">{esc(text["figure_label"][0].upper() + text["figure_label"][1:])}</p>'
+            f'<div class="{meter_class}"><i style="width:{info["impact_eur"] / largest * 100:.1f}%"></i></div></td>'
+            "</tr>"
+        )
+    footnote = ""
+    if any_provisional:
+        footnote = (
+            '<p class="source">Provisional: part of the estimate depends on data points that are '
+            'still open. See <a href="#open">Open points to clarify</a>.</p>'
+        )
+    steps = [
+        f"Reorder the {rules['R1']['skus']} out-of-stock products and confirm delivery dates.",
+        f"Agree a price test on the {rules['R4']['skus']} low-margin products.",
+        'Clarify the <a href="#open">open points</a>, so that the relist and promote lists can '
+        "be confirmed.",
+        "Decide delisting and relisting together at the next range review: delisting frees "
+        f"{summary['shelf_freed_now_cm']} cm of shelf now, and relisting needs "
+        f"{summary['shelf_needed_cm']} cm.",
+        f"Agree placement and promotion slots for the {rules['R3']['skus']} products with a weak share.",
+    ]
+    return f"""
+<h1>Secure availability first, then reshape the range and grow</h1>
+<p class="lead">{summary['action_count']} of {summary['sku_count']} products in {CATEGORY_NAME} need
+action. The largest lever is availability: {rules['R1']['skus']} products in growing markets are out
+of stock, which puts {eur(rules['R1']['impact_eur'])} of 12-week revenue at risk.</p>
+<h2>What drives the review, and what to do about it</h2>
+<div class="table-wrap summary-table"><table>
+<thead><tr><th>Stage</th><th>What we see</th><th>What to do</th><th>Decision needed</th>
+<th>Estimate, 12 weeks</th></tr></thead>
+<tbody>{''.join(rows)}</tbody></table></div>
+{footnote}
+<h2>Proposed sequence</h2>
+<ol class="plain">{''.join(f'<li>{step}</li>' for step in steps)}</ol>
+<h2>Where the actions sit</h2>
+<p>Number of products per action in each subcategory, largest subcategory first.</p>
+{subcategory_table(skus, cfg)}
+"""
+
+
+def actions_tab(
+    skus: pd.DataFrame, summary: dict, texts: dict, data_date: str, cfg: dict = CONFIG
+) -> str:
+    order = cfg["report_order"]
+    flagged = flagged_in_order(skus)
+    subtabs = "".join(
+        f'<a href="#actions-{slug(rule)}" data-sub="{slug(rule)}"><span class="n">{number}</span>'
+        f"{esc(KEYWORDS[rule])}</a>"
+        for number, rule in enumerate(order, start=1)
+    )
+    panels = []
+    for number, rule in enumerate(order, start=1):
+        text = texts[rule]
+        group = flagged[flagged["rule"] == rule]
+        provisional = ' <a class="flag" href="#open">Provisional</a>' if text["provisional"] else ""
+        extra = watchlist_section(skus, summary, cfg) if rule == "R1" else ""
+        panels.append(
+            f'<section data-subpanel="{slug(rule)}">'
+            '<div class="action-head"><div>'
+            f'<p class="stage-tag">Action {number} of {len(order)}, {esc(STAGES[rule].lower())}</p>'
+            f'<h1>{esc(text["title"])}</h1><p class="lead">{esc(text["why"])}</p></div>'
+            f'<div class="keyfig"><div class="figure">{text["figure"]}{provisional}</div>'
+            f'<p class="figure-label">Estimate: {esc(text["figure_label"])}</p></div></div>'
+            "<h2>What to do</h2>"
+            f'<p><strong>{esc(text["decision"])}</strong> The {len(group)} products are listed '
+            "with the largest estimate first.</p>"
+            f"{action_products_table(rule, group, cfg)}{extra}"
+            "<h2>What we learned</h2>"
+            f"{learnings_html(rule, skus, summary, data_date, cfg)}"
+            "</section>"
+        )
+    return f'<nav class="subtabs" aria-label="Actions">{subtabs}</nav>{"".join(panels)}'
+
+
+def open_points_tab(skus: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> str:
+    rules = summary["rules"]
+    to_confirm = skus[skus["verify_first"]].sort_values(["recommendation", "product_id"])
+    confirm_rows = "".join(
+        f"<tr>{product_cell(row)}"
+        f"<td class='nowrap'>{esc(str(int(row['recommendation'])) + '. ' + row['action']) if row['rule'] else 'No action'}</td>"
+        f"<td>{esc(row['verify_reason'])}</td>"
+        f"<td class='num'>{eur(row['impact_eur']) if row['rule'] else '–'}</td></tr>"
+        for _, row in to_confirm.iterrows()
+    )
+    clear = [
+        str(number) for number, rule in enumerate(cfg["report_order"], start=1)
+        if rules[rule]["verify_first"] == 0
+    ]
+    unaffected = f" Actions {' and '.join(clear)} have no open data point." if clear else ""
+    question_rows = "".join(
+        f"<tr><td><strong>{esc(question)}</strong></td><td>{esc(why)}</td></tr>"
+        for question, why in OPEN_QUESTIONS
+    )
+    return f"""
+<h1>Open points to clarify before acting</h1>
+<p class="lead">Two kinds of points are open: sales figures to confirm for
+{summary['verify_count']} products, and {len(OPEN_QUESTIONS)} questions about how the retailer
+works.</p>
+<h2>Data points to confirm</h2>
+<p>For {summary['verify_count']} products the sales figures contradict each other.
+{summary['verify_with_action']} of them have an action and are marked "Check first". Together they
+carry {eur(rules['R2']['verify_impact_eur'])} of the relist estimate and
+{eur(rules['R3']['verify_impact_eur'])} of the promote estimate.{unaffected}</p>
+<div class="table-wrap"><table><thead><tr><th>Product</th><th>Action</th><th>What to confirm</th>
+<th class="num wrap">Estimate that depends on it</th></tr></thead><tbody>{confirm_rows}</tbody></table></div>
+<h2>Questions for the retailer</h2>
+<div class="table-wrap"><table class="guide"><thead><tr><th>Question</th><th>Why it matters</th></tr></thead>
+<tbody>{question_rows}</tbody></table></div>
+"""
 
 
 def action_table(rows: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> str:
@@ -915,72 +1514,93 @@ def action_table(rows: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> str:
 
 
 REPORT_CSS = """
-:root{--page:#F4F3F7;--paper:#fff;--ink:#1E1B26;--muted:#625D6E;--rule:#DDD9E3;--soft:#F0EEF3;
---accent:#6B2D5C;--blue:#2a78d6;--blue-light:#9ec5f4;--orange:#eb6834;--grey:#B4B1BC;
---warn:#fab219;--warn-soft:#FFF4D6}
+:root{--ink:#0b0d12;--night:#020409;--heading:#1e1e1e;--body:#404040;--muted:#6b665f;--sand:#a9a198;
+--line:#e7dfd3;--line-strong:#d8cab7;--soft:#f6f3ee;--paper:#fff;
+--orange:#f25722;--orange-ink:#b83a0c;--orange-soft:#fdece5;
+--lilac:#4f5db5;--lilac-ink:#2f3a86;--lilac-light:#b7bfe6;--lilac-soft:#eef0fa;--grey:#b9b3aa;
+--font:"Roobert","Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI","Helvetica Neue",Arial,sans-serif}
 *{box-sizing:border-box}
 html{color-scheme:light}
-body{margin:0;background:var(--page);color:var(--ink);font:16px/1.55 "Segoe UI",system-ui,
--apple-system,"Helvetica Neue",Arial,sans-serif;font-variant-numeric:tabular-nums}
-main{max-width:1080px;margin:0 auto;padding:44px 28px 88px}
-h1,h2,h3{font-family:Georgia,"Iowan Old Style","Times New Roman",serif;line-height:1.2;margin:0}
-h1{font-size:2.4rem;letter-spacing:-.01em;max-width:20ch}
-h2{font-size:1.6rem;margin-top:68px;padding-top:18px;border-top:2px solid var(--ink)}
-h3{font-size:1.22rem;margin-top:40px}
-p{margin:.65em 0;max-width:74ch}
-a{color:var(--accent)}
-a:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-code{font-family:inherit;font-size:.92em;background:var(--soft);padding:1px 5px;border-radius:3px}
-.meta{color:var(--muted);margin-top:10px}
-.lead{font-size:1.22rem;line-height:1.45;max-width:60ch;margin-top:22px}
-nav{display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:22px;font-size:.95rem}
+body{margin:0;background:var(--paper);color:var(--body);font:16px/1.55 var(--font);
+font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+main{max-width:1120px;margin:0 auto;padding:44px 28px 72px}
+h1,h2,h3{color:var(--heading);font-weight:500;line-height:1.15;margin:0}
+h1{font-size:2.2rem;letter-spacing:-.03em;max-width:26ch}
+h2{font-size:1.45rem;letter-spacing:-.02em;margin-top:52px;padding-top:24px;border-top:1px solid var(--line-strong)}
+h3{font-size:1.12rem;letter-spacing:-.01em;margin-top:32px}
+p{margin:.65em 0;max-width:76ch}
+strong,b{font-weight:500;color:var(--heading)}
+a{color:var(--heading);text-decoration-color:var(--orange);text-underline-offset:3px}
+a:focus-visible,button:focus-visible{outline:2px solid var(--lilac);outline-offset:2px}
+code{font-family:inherit;font-size:.92em;background:var(--soft);padding:1px 6px;border-radius:4px}
+.lead{font-size:1.2rem;line-height:1.45;max-width:62ch;margin-top:16px}
+.sub{color:var(--muted);font-size:.86em}
+.source{color:var(--muted);font-size:.84rem;margin:10px 0 0}
+.top{position:sticky;top:0;z-index:5;background:var(--night);color:#fff}
+.top-inner{max-width:1120px;margin:0 auto;padding:18px 28px 0}
+.top-row{display:flex;justify-content:space-between;align-items:center;gap:24px}
+.brand-logo{height:28px;width:auto;flex:0 0 auto;filter:invert(1)}
+.doc-title{font-size:1.2rem;font-weight:500;letter-spacing:-.02em;line-height:1.2;margin:0;color:#fff}
+.doc-sub{color:var(--sand);font-size:.88rem;margin:3px 0 0;max-width:none}
+.tabs{display:flex;flex-wrap:wrap;gap:2px 30px;margin-top:14px}
+.tabs a{padding:9px 0 12px;color:rgba(255,255,255,.68);text-decoration:none;font-weight:500;
+border-bottom:2px solid transparent}
+.tabs a:hover{color:#fff}
+.tabs a[aria-current=page]{color:#fff;border-bottom-color:var(--orange)}
+.subtabs{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:36px}
+.subtabs a{display:flex;align-items:center;gap:9px;padding:8px 18px 8px 9px;border:1px solid var(--line-strong);
+border-radius:6px;background:var(--paper);color:var(--body);text-decoration:none;font-weight:500}
+.subtabs a[aria-current=true]{background:var(--orange-soft);border-color:var(--orange);color:var(--orange-ink)}
+.subtabs a[aria-current=true] .n{background:var(--orange)}
+.n{display:inline-block;flex:0 0 auto;width:26px;height:26px;border-radius:50%;background:var(--ink);
+color:#fff;font-size:.85rem;font-weight:500;line-height:26px;text-align:center}
 .facts{display:grid;grid-template-columns:repeat(4,1fr);margin:30px 0 0;
-border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
-.facts div{padding:14px 18px 14px 0}
+border-top:1px solid var(--line-strong);border-bottom:1px solid var(--line-strong)}
+.facts div{padding:16px 18px 16px 0}
 .facts dt{font-size:.88rem;color:var(--muted)}
-.facts dd{margin:2px 0 0;font-size:1.3rem;font-weight:600}
-.facts dd small{font-size:.88rem;font-weight:400;color:var(--muted)}
-.sequence{position:relative;margin-top:8px}
-.sequence::before{content:"";position:absolute;left:17px;top:44px;bottom:30px;width:2px;background:var(--accent)}
-.stage{position:relative;margin:28px 0 10px 54px;font:600 .95rem/1.3 "Segoe UI",system-ui,sans-serif;color:var(--accent)}
-.step{position:relative;display:grid;grid-template-columns:36px minmax(0,1fr);gap:18px;margin-bottom:10px}
-.step:last-child::after{content:"";position:absolute;left:8px;top:52px;bottom:-12px;width:20px;background:var(--page)}
-.step-num{width:36px;height:36px;margin-top:14px;border-radius:50%;background:var(--accent);color:#fff;
-font:700 1.05rem/36px Georgia,serif;text-align:center}
-.step-card{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:28px;background:var(--paper);
-border:1px solid var(--rule);border-radius:6px;padding:16px 22px 18px}
-.step-card h3{margin:0;font-size:1.2rem}
-.step-card h3 a{color:var(--ink);text-decoration-color:var(--rule);text-underline-offset:3px}
-.step-card p{margin:.45em 0 0;font-size:.97rem}
-.figure{font-size:1.55rem;font-weight:700;line-height:1.15}
-.figure-label{font-size:.88rem;color:var(--muted);margin:3px 0 9px}
-.meter{height:8px;background:var(--soft);border-radius:0 4px 4px 0}
-.meter i{display:block;height:100%;min-width:3px;background:var(--blue);border-radius:0 4px 4px 0}
+.facts dd{margin:2px 0 0;font-size:1.55rem;font-weight:500;letter-spacing:-.02em;color:var(--heading)}
+.facts dd small{font-size:.88rem;font-weight:400;letter-spacing:0;color:var(--muted)}
+.figure{font-size:1.45rem;font-weight:500;letter-spacing:-.02em;line-height:1.15;color:var(--heading)}
+.figure-label{font-size:.88rem;color:var(--muted);margin:3px 0 8px}
+.meter{height:6px;background:var(--soft);border-radius:0 3px 3px 0}
+.meter i{display:block;height:100%;min-width:3px;background:var(--lilac);border-radius:0 3px 3px 0}
 .meter.cost i{background:var(--grey)}
-.links{margin:22px 0 0 54px;padding-left:18px;font-size:.97rem;max-width:72ch}
-.links li{margin:.4em 0}
-.method{display:grid;grid-template-columns:150px minmax(0,1fr);gap:6px 18px;margin:14px 0 18px;
-font-size:.94rem;max-width:860px}
-.method dt{color:var(--muted)}
-.method dd{margin:0}
-.bars,.shelf,.chart{background:var(--paper);border:1px solid var(--rule);border-radius:6px;
+.summary-table td{padding:18px 14px;font-size:.95rem}
+.summary-table td:last-child{min-width:210px}
+.stage-cell{color:var(--heading);font-weight:500;width:112px;border-right:1px solid var(--line)}
+.action-name{display:flex;gap:10px;align-items:flex-start;font-weight:500}
+.action-head{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:40px;align-items:start}
+.stage-tag{margin:0 0 8px;color:var(--orange-ink);font-weight:500;font-size:.92rem}
+.keyfig{background:var(--night);border-radius:20px;padding:22px 24px}
+.keyfig .figure{font-size:2rem;color:#fff}
+.keyfig .figure-label{margin-bottom:0;color:var(--sand)}
+.learning{margin-top:24px;padding:24px 28px 20px;background:var(--paper);border:1px solid var(--line);
+border-radius:20px}
+.learning h3{margin:0 0 4px;font-size:1.28rem;letter-spacing:-.02em;max-width:58ch}
+.exhibit-no{margin:0 0 6px;color:var(--muted);font-size:.84rem;font-weight:500}
+.learning .bars,.learning .shelf,.learning .chart,.learning .table-wrap{border:0;border-radius:0;padding:0;margin:14px 0 6px}
+.bars,.shelf,.chart{background:var(--paper);border:1px solid var(--line);border-radius:12px;
 padding:10px 18px;margin:14px 0}
-.bar-row{display:grid;grid-template-columns:minmax(0,36%) minmax(0,1fr) minmax(0,27%);gap:16px;
-align-items:center;padding:6px 0;font-size:.9rem}
-.bar-row+.bar-row{border-top:1px solid var(--soft)}
+.bar-row{display:grid;grid-template-columns:minmax(0,36%) minmax(0,1fr) minmax(0,25%);gap:16px;
+align-items:center;padding:7px 0;font-size:.9rem}
+.bar-row+.bar-row{border-top:1px dotted var(--line-strong)}
 .sku-id{color:var(--muted);font-size:.84em}
 .bar-track,.shelf-track{display:flex;align-items:center;gap:8px}
 .bar-fill{height:14px;flex:0 0 auto;width:calc((100% - 78px) * var(--r));min-width:2px;
-background:var(--blue);border-radius:0 4px 4px 0}
-.bar-value{font-weight:600;white-space:nowrap}
+background:var(--lilac);border-radius:0 4px 4px 0}
+.bar-fill.fill-light{background:var(--lilac-light)}
+.bar-value{font-weight:500;color:var(--heading);white-space:nowrap}
 .bar-note{color:var(--muted)}
-.flag{display:inline-block;font-size:.8rem;font-weight:600;line-height:1.5;padding:0 7px;border-radius:3px;
-background:var(--warn-soft);border-left:3px solid var(--warn);color:var(--ink);white-space:nowrap}
-.flag-info{background:var(--soft);border-left-color:var(--accent)}
+.barcell i{display:block;height:5px;margin:5px 0 0 auto;width:calc(100% * var(--r));min-width:2px;
+background:var(--lilac);border-radius:3px 0 0 3px}
+.barcell{min-width:120px}
+.flag{display:inline-block;font-size:.8rem;font-weight:500;line-height:1.55;padding:0 8px;border-radius:6px;
+background:var(--lilac-soft);color:var(--lilac-ink);white-space:nowrap;text-decoration:none;vertical-align:middle;
+letter-spacing:0}
 .legend{display:flex;flex-wrap:wrap;gap:6px 22px;font-size:.88rem;color:var(--muted);margin:6px 0 12px;max-width:none}
 .sw{display:inline-block;width:12px;height:12px;border-radius:2px;margin-right:7px;vertical-align:-1px}
 .sw-dot{border-radius:50%}
-.sw-now{background:var(--blue)}.sw-later{background:var(--blue-light)}
+.sw-now{background:var(--lilac)}.sw-later{background:var(--lilac-light)}
 .sw-need{background:var(--orange)}.sw-other{background:var(--grey)}
 .shelf-row{display:grid;grid-template-columns:130px minmax(0,1fr);gap:14px;align-items:center;
 padding:6px 0;font-size:.9rem}
@@ -988,391 +1608,261 @@ padding:6px 0;font-size:.9rem}
 .shelf-track .bar-value{margin-left:8px}
 .seg{height:20px}
 .shelf-track .seg:last-of-type{border-radius:0 4px 4px 0}
-.chart{margin-left:0;margin-right:0}
 .chart svg{display:block;width:100%;height:auto}
 .chart text{font-size:12px;fill:var(--muted)}
-.chart .axis-title,.chart .ref-label{fill:var(--ink)}
+.chart .axis-title,.chart .ref-label{fill:var(--heading)}
 .grid{stroke:var(--soft);stroke-width:1}
-.ref{stroke:var(--muted);stroke-width:1}
-.zone{fill:var(--blue);opacity:.07}
-.dot-other{fill:var(--grey);opacity:.75}
-.dot-promote{fill:var(--blue);stroke:#fff;stroke-width:2}
-.table-wrap{overflow-x:auto;background:var(--paper);border:1px solid var(--rule);border-radius:6px;margin:14px 0}
+.ref{stroke:#8d877e;stroke-width:1}
+.zone{fill:var(--lilac);opacity:.07}
+.dot-other{fill:var(--grey);opacity:.8}
+.dot-pick{fill:var(--lilac);stroke:#fff;stroke-width:2}
+.table-wrap{overflow-x:auto;background:var(--paper);border:1px solid var(--line);border-radius:12px;margin:16px 0}
 table{border-collapse:collapse;width:100%;font-size:.89rem}
-th{font-weight:600;text-align:left;color:var(--muted);border-bottom:1px solid var(--ink);
-padding:10px 12px;vertical-align:bottom;line-height:1.3}
-td{padding:9px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
+th{font-weight:500;text-align:left;color:var(--muted);border-bottom:1px solid var(--line-strong);
+padding:11px 12px;vertical-align:bottom;line-height:1.3}
+td{padding:10px 12px;border-bottom:1px dotted var(--line-strong);vertical-align:top}
 tr:last-child td{border-bottom:0}
 .num{text-align:right;white-space:nowrap}
 .num.wrap{white-space:normal}.nowrap{white-space:nowrap}
+.guide td{padding:14px 12px;font-size:.95rem}
+.guide td:first-child{white-space:nowrap;font-weight:500}
+.action-products td:first-child{min-width:240px}
 #action-table td:nth-child(2){min-width:230px}#action-table td:last-child{min-width:230px}
-.sub{color:var(--muted);font-size:.86em}
-.filters{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 0}
-.filters button{font:inherit;font-size:.9rem;padding:6px 13px;border:1px solid var(--rule);
-border-radius:999px;background:var(--paper);color:var(--ink);cursor:pointer}
-.filters button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
-.plain{padding-left:20px;max-width:74ch}
+.filters{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0 0}
+.filters button{font:inherit;font-size:.9rem;font-weight:500;padding:7px 14px;border:1px solid var(--line-strong);
+border-radius:6px;background:var(--paper);color:var(--body);cursor:pointer}
+.filters button[aria-pressed=true]{background:var(--orange-soft);border-color:var(--orange);color:var(--orange-ink)}
+.plain{padding-left:20px;max-width:76ch}
 .plain li{margin:.45em 0}
-footer{margin-top:64px;padding-top:16px;border-top:1px solid var(--rule);color:var(--muted);font-size:.9rem}
-.exec main{max-width:1000px}
-.exec h1{max-width:24ch}
-.exec-table{margin-top:30px}
-.exec-table td{padding:16px 14px;font-size:.95rem}
-.exec-table td p{margin:.3em 0 0}
-.exec-table h3{margin:0;font-size:1.08rem}
-.exec-table h3 a{color:var(--ink);text-decoration-color:var(--rule);text-underline-offset:3px}
-.exec-table .figure{font-size:1.3rem}
-.exec-table .figure-label{margin:2px 0 7px}
-.exec-table td:nth-child(n+3):last-child{min-width:170px}
-.stage-cell{color:var(--accent);font-weight:600;width:118px;border-right:1px solid var(--rule)}
-.n{display:inline-block;width:30px;height:30px;border-radius:50%;background:var(--accent);color:#fff;
-font:700 1rem/30px Georgia,serif;text-align:center}
-.notes{display:grid;grid-template-columns:repeat(3,1fr);gap:28px;margin-top:30px}
-.notes h3{margin:0 0 6px;font-size:1.05rem}
-.notes p{margin:0;font-size:.94rem}
+footer{max-width:1120px;margin:0 auto;padding:18px 28px 44px;color:var(--muted);font-size:.88rem;
+border-top:1px solid var(--line)}
 @media (max-width:780px){
-.notes{grid-template-columns:1fr}
-main{padding:28px 16px 60px}h1{font-size:1.9rem}
+main{padding:28px 16px 56px}.top-inner{padding:14px 16px 0}h1{font-size:1.7rem}
+.tabs{gap:0 20px}
 .facts{grid-template-columns:1fr 1fr}
-.step-card{grid-template-columns:1fr;gap:14px}
+.action-head{grid-template-columns:1fr;gap:18px}
 .bar-row{grid-template-columns:1fr;gap:4px}
-.method{grid-template-columns:1fr;gap:2px}.method dd{margin-bottom:8px}
 .shelf-row{grid-template-columns:1fr;gap:4px}}
-@media print{body{background:#fff}main{max-width:none;padding:0}
-.filters{display:none}.step,.bar-row,tr{break-inside:avoid}h2{break-after:avoid}}
+@media print{.top{position:static;background:none;color:var(--heading)}.doc-title{color:var(--heading)}
+.brand-logo{filter:none}.tabs,.subtabs,.filters{display:none}
+main{max-width:none;padding:0}[data-panel],[data-subpanel]{display:block!important;break-before:page}
+.learning,.bar-row,tr{break-inside:avoid}}
 """
 
 REPORT_JS = """
-document.querySelectorAll('[data-filter]').forEach(function (button) {
-  button.addEventListener('click', function () {
-    var wanted = button.dataset.filter;
-    document.querySelectorAll('[data-filter]').forEach(function (other) {
-      other.setAttribute('aria-pressed', String(other === button));
+(function () {
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('[data-tab]'));
+  var panels = Array.prototype.slice.call(document.querySelectorAll('[data-panel]'));
+  var subs = Array.prototype.slice.call(document.querySelectorAll('[data-sub]'));
+  var subpanels = Array.prototype.slice.call(document.querySelectorAll('[data-subpanel]'));
+  var currentSub = subpanels.length ? subpanels[0].dataset.subpanel : '';
+
+  function show(hash) {
+    var parts = (hash || '').replace('#', '').split('-');
+    var tab = panels.some(function (p) { return p.dataset.panel === parts[0]; }) ? parts[0] : 'info';
+    if (tab === 'actions' && subpanels.some(function (p) { return p.dataset.subpanel === parts[1]; })) {
+      currentSub = parts[1];
+    }
+    tabs.forEach(function (t) {
+      if (t.dataset.tab === tab) { t.setAttribute('aria-current', 'page'); } else { t.removeAttribute('aria-current'); }
     });
-    document.querySelectorAll('#action-table tbody tr').forEach(function (row) {
-      row.hidden = wanted !== 'all' && row.dataset.rec !== wanted;
+    panels.forEach(function (p) { p.hidden = p.dataset.panel !== tab; });
+    subs.forEach(function (s) { s.setAttribute('aria-current', String(s.dataset.sub === currentSub)); });
+    subpanels.forEach(function (p) { p.hidden = p.dataset.subpanel !== currentSub; });
+    window.scrollTo(0, 0);
+  }
+  window.addEventListener('hashchange', function () { show(location.hash); });
+  show(location.hash);
+
+  document.querySelectorAll('[data-filter]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var wanted = button.dataset.filter;
+      document.querySelectorAll('[data-filter]').forEach(function (other) {
+        other.setAttribute('aria-pressed', String(other === button));
+      });
+      document.querySelectorAll('#action-table tbody tr').forEach(function (row) {
+        row.hidden = wanted !== 'all' && row.dataset.rec !== wanted;
+      });
     });
   });
-});
+})();
 """
 
+ASSETS = Path(__file__).parent / "assets"
 
-def build_report(
-    skus: pd.DataFrame, summary: dict, data_date: str, run_date: str, cfg: dict = CONFIG
-) -> str:
-    """Assemble the report: recommendations, evidence, checks, full list, method."""
-    rules = summary["rules"]
+
+def font_face_css() -> str:
+    """Embed the Inter font so the report looks the same offline.
+
+    Inter is open licence (see assets/INTER-LICENSE.txt). If the file is
+    missing the report falls back to the system font.
+    """
+    font = ASSETS / "inter-latin-variable.woff2"
+    if not font.exists():
+        return ""
+    data = base64.b64encode(font.read_bytes()).decode("ascii")
+    return (
+        '@font-face{font-family:"Inter";font-style:normal;font-weight:100 900;font-display:swap;'
+        f'src:url(data:font/woff2;base64,{data}) format("woff2")}}'
+    )
+
+
+def logo_html() -> str:
+    """The Zenline logo for the top bar, from assets/zenline-logo.png.
+
+    The file is dark on a transparent background, so the style sheet inverts it
+    to white for the dark bar. If the file is missing, no logo is shown.
+    """
+    logo = ASSETS / "zenline-logo.png"
+    if not logo.exists():
+        return ""
+    data = base64.b64encode(logo.read_bytes()).decode("ascii")
+    return f'<img class="brand-logo" alt="Zenline AI" src="data:image/png;base64,{data}">'
+
+
+TABS = [  # (id used in links, label)
+    ("info", "Info"),
+    ("summary", "Executive summary"),
+    ("actions", "Actions"),
+    ("open", "Open points to clarify"),
+    ("list", "Full action list"),
+]
+
+
+def build_report(skus: pd.DataFrame, summary: dict, data_date: str, cfg: dict = CONFIG) -> str:
+    """Assemble the tabbed report: info, executive summary, actions, open points, full list."""
     texts = recommendation_texts(skus, summary, cfg)
     flagged = flagged_in_order(skus)
-    number = {rule: n for n, rule in enumerate(cfg["report_order"], start=1)}
-    largest = max(info["impact_eur"] for info in rules.values()) or 1
-
-    # --- Recommendations, in order of execution ---
-    steps, last_stage = [], None
-    for rule in cfg["report_order"]:
-        if STAGES[rule] != last_stage:
-            last_stage = STAGES[rule]
-            steps.append(f'<p class="stage">{esc(last_stage)}</p>')
-        text = texts[rule]
-        meter_class = "meter cost" if rule == "R5" else "meter"
-        steps.append(
-            f'<div class="step"><div class="step-num">{number[rule]}</div><div class="step-card">'
-            f'<div><h3><a href="#evidence-{rule.lower()}">{esc(text["title"])}</a></h3>'
-            f'<p>{esc(text["why"])}</p></div>'
-            f'<div><div class="figure">{text["figure"]}</div>'
-            f'<p class="figure-label">Estimate: {esc(text["figure_label"])}</p>'
-            f'<div class="{meter_class}"><i style="width:{rules[rule]["impact_eur"] / largest * 100:.1f}%"></i></div>'
-            "</div></div></div>"
-        )
-
-    links = [
-        f"Actions 3 and 4 work as a pair. Delisting frees {summary['shelf_freed_now_cm']} cm now "
-        f"and {summary['shelf_freed_later_cm']} cm once the marked-down products have sold "
-        f"through, and the relist candidates need {summary['shelf_needed_cm']} cm. This holds "
-        "only if inactive products no longer occupy their shelf space, which is an open "
-        "question for ZenBeauty."
-    ]
-    for _, row in skus[(skus["rule"] == "R1") & (skus["price_gap_note"] != "")].iterrows():
-        links.append(
-            f"Actions 1 and 2 meet in {row['product_id']} {row['product_name']}: it is out of "
-            f"stock and priced at {row['price_gap_note'].replace('EUR ', '€')}. Restock it "
-            "first, then review its price."
-        )
-
-    # --- Evidence, one section per recommendation ---
-    evidence = []
-    for rule in cfg["report_order"]:
-        method = rule_method(rule, summary, cfg)
-        group = flagged[flagged["rule"] == rule]
-        fields = ", ".join(f"<code>{esc(name)}</code>" for name in method["fields"])
-        partner, task = RULES[rule]["coordinate_with"].split(": ", 1)
-        extra = ""
-        if rule == "R4":
-            extra = price_gap_table(skus)
-        if rule == "R5":
-            extra = (
-                "<p>Shelf space freed by this action, against the space the relist candidates "
-                "of action 4 need.</p>" + shelf_html(summary)
-            )
-        if rule == "R3":
-            extra = (
-                "<p>Each dot is an active product that is in stock. Promote candidates sit in "
-                "the shaded area: the market is growing and our share is weak.</p>"
-                + scatter_svg(skus, summary, cfg)
-            )
-        evidence.append(
-            f'<section id="evidence-{rule.lower()}"><h3>{number[rule]}. {esc(texts[rule]["title"])}</h3>'
-            '<dl class="method">'
-            f'<dt>Rule</dt><dd>{esc(method["rule"])}</dd>'
-            f"<dt>Data fields used</dt><dd>{fields}</dd>"
-            f'<dt>Estimate</dt><dd>{esc(method["estimate"])}</dd>'
-            f'<dt>Owner</dt><dd>{esc(OWNER)}. Coordinate with {esc(partner.lower())}: {esc(task)}.</dd>'
-            f"</dl>{extra}"
-            f"<p>The {len(group)} products, largest estimate first. Hover over a row for the "
-            "full evidence.</p>"
-            f"{bars_html(rule, group)}</section>"
-        )
-
-    # --- Checks ---
-    check_labels = {
-        key: label.format(tol=cfg["check_price_tolerance"]) for key, label in SKU_CHECKS.items()
+    panels = {
+        "info": info_tab(summary, data_date, cfg),
+        "summary": summary_tab(skus, summary, texts, cfg),
+        "actions": actions_tab(skus, summary, texts, data_date, cfg),
+        "open": open_points_tab(skus, summary, cfg),
+        "list": (
+            "<h1>Full action list</h1>"
+            f"<p>All {summary['action_count']} products with an action. The same list, with every "
+            "evidence field, the owner and who to coordinate with, is in "
+            "<code>action_list.csv</code> next to this report.</p>"
+            + action_table(flagged, summary, cfg)
+        ),
     }
-    check_rows = "".join(
-        f"<tr><td>{esc(check_labels[key])}</td><td class='num'>{summary['checks'][key]}</td></tr>"
-        for key in SKU_CHECKS
+    tab_links = "".join(
+        f'<a href="#{tab_id}" data-tab="{tab_id}">{esc(label)}</a>' for tab_id, label in TABS
     )
-    to_verify = skus[skus["verify_first"]].sort_values(["recommendation", "product_id"])
-    verify_rows = "".join(
-        f"<tr><td><span class='sku-id'>{esc(row['product_id'])}</span> {esc(row['product_name'])}</td>"
-        f"<td class='nowrap'>{esc(str(int(row['recommendation'])) + '. ' + row['action']) if row['rule'] else 'No action'}</td>"
-        f"<td>{esc(row['verify_reason'])}</td></tr>"
-        for _, row in to_verify.iterrows()
+    sections = "".join(
+        f'<section data-panel="{tab_id}">{panels[tab_id]}</section>' for tab_id, _ in TABS
     )
-
-    # --- Watchlist ---
-    watch = skus[skus["watchlist"]].sort_values("channel_revenue_eur_12w", ascending=False)
-    watch_rows = "".join(
-        f"<tr><td><span class='sku-id'>{esc(row['product_id'])}</span> {esc(row['product_name'])}</td>"
-        f"<td class='num'>{eur(row['channel_revenue_eur_12w'])}</td>"
-        f"<td class='num'>{pct(row['market_sales_trend_12w_pct'], signed=True)}</td>"
-        f"<td>{esc(str(int(row['recommendation'])) + '. ' + row['action']) if row['rule'] else 'None'}</td></tr>"
-        for _, row in watch.iterrows()
-    )
-
-    thresholds = [
-        ("Our average share of the tracked market", pct(summary["avg_share"], digits=1)),
-        ("Restock: market trend above", pct(cfg["r1_market_trend_min"])),
-        ("Price review: margin below", pct(cfg["r4_margin_max"])),
-        ("Price review: price increase used in the estimate", pct(cfg["r4_price_increase"])),
-        ("Price gap note: price differs from the competitor by more than", pct(cfg["r4b_price_gap"])),
-        ("Delist or mark down: revenue in the bottom", f"{pct(cfg['r5_revenue_quantile'])} of all "
-         f"products, which is below {eur(summary['r5_revenue_cutoff'])} in this data"),
-        ("Relist: market trend above", pct(cfg["r2_market_trend_min"], signed=True)),
-        ("Promote: market trend above", pct(cfg["r3_market_trend_min"], signed=True)),
-        ("Promote: share below", f"{pct(cfg['r3_share_factor'])} of the average share"),
-        ("Watchlist: low stock and market trend above", pct(cfg["watch_market_trend_min"], signed=True)),
-    ]
-    threshold_rows = "".join(f"<tr><td>{esc(a)}</td><td>{esc(b)}</td></tr>" for a, b in thresholds)
-    questions = "".join(f"<li>{esc(q)}</li>" for q in OPEN_QUESTIONS)
-
-    body = f"""
-<header>
-<h1>Hair Coloration: what needs attention, and in what order</h1>
-<p class="meta">Category review for ZenBeauty Retail, Beauty &gt; Hair Coloration. Data as of
-{long_date(data_date)}, covering the previous 12 weeks. Report generated {long_date(run_date)}.
-A one-page version is in the <a href="executive_summary.html">executive summary</a>.</p>
-<p class="lead">{summary['action_count']} of {summary['sku_count']} products need an action. Start
-with availability: {rules['R1']['skus']} products in growing markets are out of stock, which puts
-{eur(rules['R1']['impact_eur'])} of 12-week revenue at risk.</p>
-<nav aria-label="Sections"><a href="#actions">Five actions</a><a href="#subcategories">By subcategory</a>
-<a href="#evidence">Evidence</a><a href="#checks">Check before acting</a><a href="#watchlist">Watchlist</a>
-<a href="#list">Full action list</a><a href="#method">Method and open questions</a></nav>
-<dl class="facts">
-<div><dt>Products reviewed</dt><dd>{summary['sku_count']} <small>{summary['active_count']} active,
-{summary['inactive_count']} inactive</small></dd></div>
-<div><dt>Channel revenue, 12 weeks</dt><dd>{eur(summary['channel_revenue'])}</dd></div>
-<div><dt>Our share of the tracked market</dt><dd>{pct(summary['avg_share'], digits=1)}</dd></div>
-<div><dt>Products with an action</dt><dd>{summary['action_count']} <small>{summary['verify_with_action']}
-to check first</small></dd></div>
-</dl>
-</header>
-
-<section id="actions">
-<h2>Five actions, in the order to carry them out</h2>
-<p>The order is the sequence of execution, not a ranking by size: fix the range you have, then
-change it, then grow it. Each product appears under one action only. The euro figures are 12-week
-run-rate estimates with their formula shown in the evidence. They measure different things, so
-they are shown side by side and not added up.</p>
-<div class="sequence">{''.join(steps)}</div>
-<ul class="links">{''.join(f'<li>{esc(item)}</li>' for item in links)}</ul>
-</section>
-
-<section id="subcategories">
-<h2>Where the actions sit</h2>
-<p>Number of products per action in each subcategory, largest subcategory first.</p>
-{subcategory_table(skus, cfg)}
-</section>
-
-<section id="evidence">
-<h2>Evidence for each action</h2>
-<p>Every figure below comes from the three data files provided. Field names are the column names
-in those files.</p>
-{''.join(evidence)}
-</section>
-
-<section id="checks">
-<h2>Check before acting</h2>
-<p>{summary['verify_count']} products have figures that contradict each other,
-{summary['verify_with_action']} of them with an action. They keep their action but are marked
-"Check first": confirm the numbers with the data owner before acting on them.</p>
-<div class="table-wrap"><table><thead><tr><th>Check</th><th class="num">Products</th></tr></thead>
-<tbody>{check_rows}</tbody></table></div>
-<div class="table-wrap"><table><thead><tr><th>Product</th><th>Action</th><th>What to check</th></tr></thead>
-<tbody>{verify_rows}</tbody></table></div>
-<p>In the competitor file, {summary['checks']['competitor_score_out_of_range']} popularity scores
-lie outside the 0 to 100 range. They are capped at 100 and do not affect any action.</p>
-</section>
-
-<section id="watchlist">
-<h2>Watchlist</h2>
-<p>Not a recommendation. These {summary['watchlist_count']} active products are low on stock while
-their market grows by more than {pct(cfg['watch_market_trend_min'])}. Together they earned
-{eur(summary['watchlist_revenue'])} in 12 weeks, so they are the next candidates for action 1
-if stock runs out.</p>
-<div class="table-wrap"><table><thead><tr><th>Product</th><th class="num">Revenue, 12 weeks</th>
-<th class="num">Market trend</th><th>Current action</th></tr></thead><tbody>{watch_rows}</tbody></table></div>
-</section>
-
-<section id="list">
-<h2>Full action list</h2>
-<p>All {summary['action_count']} products with an action. The same list, with every evidence field,
-the owner and who to coordinate with, is in <code>action_list.csv</code> next to this report.</p>
-{action_table(flagged, summary, cfg)}
-</section>
-
-<section id="method">
-<h2>Method and open questions</h2>
-<h3>Thresholds used in this run</h3>
-<div class="table-wrap"><table><tbody>{threshold_rows}</tbody></table></div>
-<h3>How to read the estimates</h3>
-<ul class="plain">
-<li>All estimates are simple 12-week run rates. They assume no change in volume when a price
-changes and no effect of one action on another.</li>
-<li>Sales trends are used as a direction only. No euro figure is derived from a trend.</li>
-<li>Each product has one primary action. Where several rules apply, the order is restock, relist,
-promote, price review, delist.</li>
-<li>Competitor data is matched by exact product name only, which is why just
-{summary['price_gap_notes']} price gaps are shown.</li>
-</ul>
-<h3>Open questions for ZenBeauty</h3>
-<ul class="plain">{questions}</ul>
-</section>
-
-<footer>Generated by review.py from the files in the input folder. Rules and thresholds are
-documented in docs/DECISIONS.md.</footer>
-"""
-    return html_page("Hair Coloration category review", body, script=REPORT_JS)
-
-
-def html_page(title: str, body: str, body_class: str = "", script: str = "") -> str:
-    """Wrap a body in one self-contained HTML document."""
-    script_tag = f"<script>{script}</script>" if script else ""
     return (
         '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>{esc(title)}</title>"
-        f'<style>{REPORT_CSS}</style></head><body class="{body_class}"><main>{body}</main>'
-        f"{script_tag}</body></html>\n"
+        f"<title>{esc(REPORT_TITLE)}: {esc(CATEGORY_NAME)}</title>"
+        f"<style>{font_face_css()}{REPORT_CSS}</style></head><body>"
+        '<header class="top"><div class="top-inner"><div class="top-row"><div>'
+        f'<p class="doc-title">{esc(REPORT_TITLE)}</p>'
+        f'<p class="doc-sub">{esc(CATEGORY_NAME)}. Data as of {long_date(data_date)}, covering the '
+        f"previous 12 weeks.</p></div>{logo_html()}</div>"
+        f'<nav class="tabs" aria-label="Sections">{tab_links}</nav></div></header>'
+        f"<main>{sections}</main>"
+        f"<footer>{esc(AUTHOR_LINE)}</footer>"
+        f"<script>{REPORT_JS}</script></body></html>\n"
     )
 
 
 # ---------------------------------------------------------------------------
-# 6. Executive summary: one page for a decision maker
+# 6. Method file: assumptions and calculations behind the report
 # ---------------------------------------------------------------------------
-EXEC_DECISIONS = {  # what each action asks the decision maker for
-    "R1": "Reorder now and confirm delivery dates.",
-    "R4": "Agree a price test on these products.",
-    "R5": "Approve the delist and markdown list.",
-    "R2": "Approve the relist list.",
-    "R3": "Agree placement and promotion slots.",
-}
-
-
-def build_executive_summary(
-    skus: pd.DataFrame, summary: dict, data_date: str, run_date: str, cfg: dict = CONFIG
-) -> str:
-    """The five actions on one page: the decision, the estimate, what is still unverified."""
-    rules = summary["rules"]
-    texts = recommendation_texts(skus, summary, cfg)
-    largest = max(info["impact_eur"] for info in rules.values()) or 1
-    order = cfg["report_order"]
-
-    rows, seen_stages = [], set()
-    for number, rule in enumerate(order, start=1):
-        info, text = rules[rule], texts[rule]
-        stage_cell = ""
-        if STAGES[rule] not in seen_stages:
-            seen_stages.add(STAGES[rule])
-            span = sum(1 for other in order if STAGES[other] == STAGES[rule])
-            stage_cell = f'<td class="stage-cell" rowspan="{span}">{esc(STAGES[rule])}</td>'
-        partner = RULES[rule]["coordinate_with"].split(": ", 1)[0].lower()
-        decision = EXEC_DECISIONS[rule]
-        if info["verify_first"]:
-            check = (
-                f"{info['verify_first']} products, carrying {eur(info['verify_impact_eur'])} of "
-                "the estimate"
-            )
-            decision += " Check the flagged products first."
-        else:
-            check = "None"
-        meter_class = "meter cost" if rule == "R5" else "meter"
-        rows.append(
-            f"<tr>{stage_cell}"
-            f'<td><span class="n">{number}</span></td>'
-            f'<td><h3><a href="category_review.html#evidence-{rule.lower()}">{esc(text["title"])}</a></h3>'
-            f'<p>{esc(decision)}</p><p class="sub">{esc(OWNER)}, with {esc(partner)}</p></td>'
-            f'<td><div class="figure">{text["figure"]}</div>'
-            f'<p class="figure-label">Estimate: {esc(text["figure_label"])}</p>'
-            f'<div class="{meter_class}"><i style="width:{info["impact_eur"] / largest * 100:.1f}%"></i></div></td>'
-            f"<td>{esc(check)}</td></tr>"
-        )
-
-    body = f"""
-<header>
-<h1>Hair Coloration: five actions, starting with availability</h1>
-<p class="meta">Executive summary for ZenBeauty Retail. Data as of {long_date(data_date)}, covering
-the previous 12 weeks. Generated {long_date(run_date)}.</p>
-<p class="lead">{summary['action_count']} of {summary['sku_count']} products need an action. Start
-with availability: {rules['R1']['skus']} products in growing markets are out of stock, which puts
-{eur(rules['R1']['impact_eur'])} of 12-week revenue at risk.</p>
-</header>
-
-<div class="table-wrap exec-table"><table>
-<thead><tr><th>Stage</th><th></th><th>Action and decision needed</th><th>Estimate, 12 weeks</th>
-<th>To verify before acting</th></tr></thead>
-<tbody>{''.join(rows)}</tbody></table></div>
-
-<div class="notes">
-<div><h3>Actions 3 and 4 are a pair</h3>
-<p>Delisting frees {summary['shelf_freed_now_cm']} cm of shelf now and
-{summary['shelf_freed_later_cm']} cm once the markdowns have sold through. The relist candidates
-need {summary['shelf_needed_cm']} cm. This assumes inactive products no longer hold shelf space,
-which ZenBeauty needs to confirm.</p></div>
-<div><h3>What needs checking first</h3>
-<p>{summary['verify_with_action']} of the {summary['action_count']} products have figures that
-contradict each other. They carry {eur(rules['R2']['verify_impact_eur'])} of the relist estimate
-and {eur(rules['R3']['verify_impact_eur'])} of the promote estimate, so treat those two figures
-as provisional until the data is confirmed.</p></div>
-<div><h3>How to read the figures</h3>
-<p>Estimates are simple 12-week run rates. They measure different things, so they are not added
-up. Separately, {summary['watchlist_count']} products are low on stock in growing markets and sit
-on a watchlist.</p></div>
-</div>
-
-<footer>The evidence for every figure is in the <a href="category_review.html">in-depth category
-review</a>. The product-level list is in <a href="action_list.csv">action_list.csv</a>.</footer>
-"""
-    return html_page("Hair Coloration executive summary", body, body_class="exec")
+def build_method_doc(summary: dict, data_date: str, cfg: dict = CONFIG) -> str:
+    """Markdown record of how every figure in the report was produced in this run."""
+    lines = [
+        "# Assumptions and calculations",
+        "",
+        f"Written by `review.py` from data as of {data_date}. This file documents "
+        "how the figures in `category_review.html` and `action_list.csv` were produced. The "
+        "decisions behind the rules, with their reasons, are in `docs/DECISIONS.md`.",
+        "",
+        "## Scope",
+        "",
+        f"- {summary['sku_count']} products: {summary['active_count']} active, "
+        f"{summary['inactive_count']} inactive.",
+        f"- 12-week channel revenue {eur(summary['channel_revenue'])}. Average share of the "
+        f"tracked market {pct(summary['avg_share'], digits=2)} (total channel revenue ÷ total "
+        "market revenue over all products).",
+        "- Trend and margin columns are fractions in the data: 0.18 means 18%.",
+        "",
+        "## The five actions",
+        "",
+    ]
+    for number, rule in enumerate(cfg["report_order"], start=1):
+        method, info = rule_method(rule, summary, cfg), summary["rules"][rule]
+        partner, task = RULES[rule]["coordinate_with"].split(": ", 1)
+        lines += [
+            f"### {number}. {RULES[rule]['name']} ({rule})",
+            "",
+            f"- Rule: {method['rule']}",
+            "- Data fields used: " + ", ".join(f"`{name}`" for name in method["fields"]),
+            f"- Estimate: {method['estimate']}",
+            f"- Result in this run: {info['skus']} products as primary action "
+            f"({info['triggered']} trigger the rule), {eur(info['impact_eur'])} "
+            f"{RULES[rule]['impact_type'].lower()}.",
+            f"- Owner: {OWNER}. Coordinate with {partner.lower()}: {task}.",
+            "",
+        ]
+    lines += [
+        "## One action per product",
+        "",
+        "Where several rules apply to a product, the first in this order is its primary action: "
+        + ", ".join(f"{RULES[rule]['name']} ({rule})" for rule in cfg["precedence"])
+        + ". The other rules it triggers are listed in the `also_qualifies_for` column of the "
+        "action list. The order of the actions in the report is the order of execution, which "
+        "is a separate choice.",
+        "",
+        "## Thresholds used in this run",
+        "",
+        "| Threshold | Value |",
+        "|---|---|",
+    ]
+    lines += [f"| {name} | {value} |" for name, value in threshold_rows(summary, cfg)]
+    lines += [
+        "",
+        "## How to read the estimates",
+        "",
+        "- All estimates are simple 12-week run rates. They assume no change in volume when a "
+        "price changes and no effect of one action on another.",
+        "- Sales trends are used as a direction only. No euro figure is derived from a trend.",
+        "- The estimates measure different things (revenue at risk, extra revenue, revenue "
+        "given up, incremental revenue) and are not added up.",
+        "- Shelf space: delist candidates free their listed shelf space now, seasonal markdown "
+        "candidates free theirs after sell-through.",
+        "- Competitor data is matched by exact product name only. A price gap is noted when the "
+        f"prices differ by more than {pct(cfg['r4b_price_gap'])}. "
+        f"{summary['price_gap_notes']} such notes exist in this run.",
+        "",
+        "## Data checks",
+        "",
+        "A product whose figures contradict each other keeps its action and is marked "
+        "\"Check first\" in the report (`verify_first` in the action list).",
+        "",
+        "| Check | Products |",
+        "|---|---|",
+    ]
+    labels = {key: label.format(tol=cfg["check_price_tolerance"]) for key, label in SKU_CHECKS.items()}
+    lines += [f"| {labels[key]} | {summary['checks'][key]} |" for key in SKU_CHECKS]
+    lines += [
+        "",
+        f"{summary['verify_count']} products are marked in total, {summary['verify_with_action']} "
+        "of them with an action. In the competitor file, "
+        f"{summary['checks']['competitor_score_out_of_range']} popularity scores lie outside the "
+        f"{cfg['score_min']} to {cfg['score_max']} range. They are clipped and affect no action.",
+        "",
+        "The run stops before any rule if a file or column is missing, a required field is "
+        "blank, a status or stock label is unknown, an ID is duplicated, or the metadata does "
+        "not match the SKU file one to one.",
+        "",
+        "## Open questions",
+        "",
+    ]
+    lines += [f"- {question} {why}" for question, why in OPEN_QUESTIONS]
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -1396,9 +1886,8 @@ def main(argv: list[str] | None = None) -> int:
     skus, competitors, check_counts = run_checks(skus, competitors)
 
     data_date = str(competitors["observed_date"].max())
-    run_date = date.today().isoformat()
     print(f"Loaded {len(skus)} SKUs and {len(competitors)} competitor rows from {args.input}/")
-    print(f"Data date {data_date}, run date {run_date}")
+    print(f"Data date {data_date}")
     print("Consistency checks:")
     for key, count in check_counts.items():
         print(f"  {key:32s} {count}")
@@ -1429,18 +1918,16 @@ def main(argv: list[str] | None = None) -> int:
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
-    action_list = build_action_list(skus, data_date, run_date)
+    action_list = build_action_list(skus, data_date)
     action_list_path = output_dir / "action_list.csv"
     action_list.to_csv(action_list_path, index=False, encoding="utf-8")
     report_path = output_dir / "category_review.html"
-    report_path.write_text(build_report(skus, summary, data_date, run_date), encoding="utf-8")
-    summary_path = output_dir / "executive_summary.html"
-    summary_path.write_text(
-        build_executive_summary(skus, summary, data_date, run_date), encoding="utf-8"
-    )
+    report_path.write_text(build_report(skus, summary, data_date), encoding="utf-8")
+    method_path = output_dir / METHOD_FILE
+    method_path.write_text(build_method_doc(summary, data_date), encoding="utf-8")
     print(f"Wrote {action_list_path} ({len(action_list)} SKUs)")
     print(f"Wrote {report_path}")
-    print(f"Wrote {summary_path}")
+    print(f"Wrote {method_path}")
     return 0
 
 

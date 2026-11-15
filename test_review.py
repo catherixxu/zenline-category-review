@@ -1,6 +1,6 @@
 """Tests for review.py. Run with: pytest
 
-The expected values are the figures approved in docs/DECISIONS.md for the
+The expected values are the figures recorded in docs/DECISIONS.md for the
 provided data drop. If a rule or threshold changes, these tests should fail.
 """
 import re
@@ -165,9 +165,47 @@ def test_full_run_writes_consistent_outputs(tmp_path):
     assert actions["recommendation"].is_monotonic_increasing  # order of execution
     assert (actions["verify_first"] == "yes").sum() == 10
 
-    for name in ["category_review.html", "executive_summary.html"]:
-        page = (out / name).read_text(encoding="utf-8")
-        for figure in ["€61,646", "€2,347", "€6,689", "€30,364", "€20,486"]:
-            assert figure in page, f"{figure} missing from {name}"
-        # self-contained: no scripts, styles, fonts or images loaded from the web
-        assert not re.search(r'(src|href)="https?://', page)
+    page = (out / "category_review.html").read_text(encoding="utf-8")
+    for figure in ["€61,646", "€2,347", "€6,689", "€30,364", "€20,486"]:
+        assert figure in page, f"{figure} missing from the report"
+    for tab_id, _ in review.TABS:  # info, summary, actions, open points, full list
+        assert f'data-panel="{tab_id}"' in page
+    for keyword in review.KEYWORDS.values():  # one sub-tab per action
+        assert f'data-subpanel="{keyword.lower()}"' in page
+    # self-contained: no scripts, styles, fonts or images loaded from the web
+    assert not re.search(r'(src|href)="https?://', page)
+    assert "url(http" not in page
+    # outputs carry the data date but no creation date, so reruns give the same files
+    assert "Data as of 1 July 2026" in page
+    assert "Generated" not in page
+    assert set(actions["data_date"]) == {"2026-07-01"}
+
+
+def test_method_details_are_in_the_method_file_not_the_report(tmp_path):
+    """Rules, data fields and formulas are documented next to the report, not inside it (B14)."""
+    out = tmp_path / "out"
+    review.main(["--input", str(DATA), "--output", str(out)])
+    page = (out / "category_review.html").read_text(encoding="utf-8")
+    method = (out / review.METHOD_FILE).read_text(encoding="utf-8")
+    for detail in ["Data fields used", "channel_margin_pct", "Owner: Category manager"]:
+        assert detail in method
+        assert detail not in page
+    for rule in review.CONFIG["report_order"]:
+        assert f"({rule})" in method
+
+
+def test_provisional_estimates(run):
+    """Relist and promote rest on open data points for more than 10% of their estimate."""
+    skus, summary = run
+    texts = review.recommendation_texts(skus.reset_index(), summary)
+    assert {rule for rule, text in texts.items() if text["provisional"]} == {"R2", "R3"}
+
+
+def test_rerun_gives_identical_files(tmp_path):
+    """No output carries a creation date: the same data gives the same three files (B19)."""
+    first, second = tmp_path / "first", tmp_path / "second"
+    review.main(["--input", str(DATA), "--output", str(first)])
+    review.main(["--input", str(DATA), "--output", str(second)])
+    for name in ["action_list.csv", "category_review.html", review.METHOD_FILE]:
+        assert (first / name).read_bytes() == (second / name).read_bytes()
+    assert "run_date" not in review.ACTION_LIST_COLUMNS
