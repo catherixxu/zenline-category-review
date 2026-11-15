@@ -117,6 +117,46 @@ def test_consistency_check_counts(run):
     assert summary["verify_with_action"] == 10
 
 
+# --- Competitor data: matched at the best available level, evidence beside the rules ---
+def test_competitor_match_levels(run):
+    """Exact name first, then subcategory and shade, then shade only (A6, B22)."""
+    skus, summary = run
+    assert summary["competitor_match_counts"] == {
+        "exact name": 2, "subcategory and shade": 175, "shade only": 58,
+    }
+    assert skus.loc["HC0006", "competitor_match"] == "exact name"
+    assert skus.loc["HC0006", "competitor_trend"] == pytest.approx(0.33)  # its own match, CM003
+    assert skus.loc["HC0015", "competitor_match"] == "subcategory and shade"
+    assert skus.loc["HC0015", "competitor_products"] == 1  # the count behind a signal is kept (B25)
+    assert skus["competitor_trend"].notna().all()  # every product has a signal
+
+
+def test_competitor_differs_flag(run):
+    """Flag when competitor trend and market trend have opposite signs; actions unchanged (B20, B21)."""
+    skus, summary = run
+    assert summary["competitor_differs_all"] == 112
+    assert summary["competitor_differs_with_action"] == 26
+    assert {rule: info["competitor_differs"] for rule, info in summary["rules"].items()} == {
+        "R1": 2, "R4": 1, "R5": 19, "R2": 3, "R3": 1,
+    }
+    # HC0043: market +1%, competitors -15%. It stays a restock product.
+    assert skus.loc["HC0043", "competitor_trend_differs"]
+    assert skus.loc["HC0043", "rule"] == "R1"
+    assert not skus.loc["HC0006", "competitor_trend_differs"]
+
+
+def test_assortment_gaps(run):
+    """Rising competitor segments where we have no active product (B24)."""
+    skus, summary = run
+    gaps = summary["assortment_gaps"]
+    assert len(gaps) == 11
+    assert all(gap["competitor_trend"] > 0 for gap in gaps)
+    active = skus[skus["status"] == "aktiv"]
+    covered = set(zip(active["subcategory"], active["shade_group"]))
+    assert all((gap["subcategory"], gap["shade_group"]) not in covered for gap in gaps)
+    assert (gaps[0]["subcategory"], gaps[0]["shade_group"]) == ("Color Care Add-on", "Pastel")
+
+
 # --- Hard failures: a broken input stops the run before any rule --------------
 def broken_copy(tmp_path, filename, change):
     """Copy the data folder and apply `change` to the lines of one file."""
@@ -190,6 +230,10 @@ def test_method_details_are_in_the_method_file_not_the_report(tmp_path):
     for detail in ["Data fields used", "channel_margin_pct", "Owner: Category manager"]:
         assert detail in method
         assert detail not in page
+    # the pack-size assumption behind competitor prices is spelled out in both
+    assert "Pack size is a major assumption" in method
+    assert "come without pack size" in page
+    assert "Assortment gaps" in page and "Competitor differs" in page
     for rule in review.CONFIG["report_order"]:
         assert f"({rule})" in method
 

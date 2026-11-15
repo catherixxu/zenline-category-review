@@ -57,8 +57,16 @@ The main assumptions, in short:
   reviewed only for relisting.
 - **The data covers roughly April to June.** Seasonal products that sell poorly are marked
   down, not delisted.
-- **Competitor data is matched by exact product name only.** It supports a price gap note on
-  the products that match and is not used for product-by-product price comparison.
+- **Competitor data is evidence beside the rules.** Every product is matched to the competitor
+  file by exact product name where there is one (2 products), otherwise by subcategory and
+  shade (175), otherwise by shade only (58). The competitor trend is shown beside every action
+  and changes none. Where it points the other way than the product's own market trend, the
+  product is flagged for discussion with the retailer. Most matches rest on one or two
+  competitor products, and that number is always shown.
+- **Competitor pricing rests on a major assumption: pack size.** The competitor file has no
+  pack size. A price gap is calculated only for the 2 products a competitor lists under exactly
+  the same name, and it assumes the competitor sells the same pack. For every other product
+  the average competitor price is shown as context only and no gap is calculated.
 - **Estimates are simple 12-week run rates.** No price elasticity and no effect of one action
   on another. They measure different things and are not added up.
 - **One primary action per product.** Where several rules apply, a fixed order decides, so no
@@ -76,7 +84,8 @@ decision, is in [docs/DECISIONS.md](docs/DECISIONS.md). The formula behind each 
   review.
 - **Track action status.** Record which actions were accepted, done or rejected, so the next
   run does not raise them again.
-- **Match competitors by EAN.** Exact product names match 2 of the 75 competitor rows. An EAN
+- **Match competitors by EAN and pack size.** Exact product names match 2 of the 75 competitor
+  rows, and competitor prices cannot be compared per unit without pack sizes. An EAN
   match would allow price comparison product by product.
 - **Add a seasonal calendar.** Time markdowns and relistings by season instead of a single
   seasonal flag.
@@ -92,7 +101,7 @@ decision, is in [docs/DECISIONS.md](docs/DECISIONS.md). The formula behind each 
 
 ```
 review.py            the whole pipeline; thresholds sit in the CONFIG block at the top
-test_review.py       26 tests: known cases, figures, hard failures, outputs
+test_review.py       29 tests: known cases, figures, hard failures, outputs
 data/                the provided files, untouched, plus the task text
 output/              the results of the last run
 assets/              logo and font embedded into the report

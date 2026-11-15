@@ -68,6 +68,7 @@ Where several rules apply to a product, the first in this order is its primary a
 | Promote: market trend above | +15% |
 | Promote: share below | 50% of the average share |
 | Watchlist: low stock and market trend above | +15% |
+| Assortment gap: no active product and competitor trend above | 0% |
 | Estimate shown as provisional when open data points carry at least | 10% of it |
 
 ## How to read the estimates
@@ -77,6 +78,24 @@ Where several rules apply to a product, the first in this order is its primary a
 - The estimates measure different things (revenue at risk, extra revenue, revenue given up, incremental revenue) and are not added up.
 - Shelf space: delist candidates free their listed shelf space now, seasonal markdown candidates free theirs after sell-through.
 - Competitor data is matched by exact product name only. A price gap is noted when the prices differ by more than 20%. 2 such notes exist in this run.
+
+## Competitor data
+
+Every product is matched to the competitor file at the best available level. The first level that finds competitor products is used:
+
+| Match level | Products |
+|---|---|
+| Exact name | 2 |
+| Subcategory and shade | 175 |
+| Shade only | 58 |
+
+- The competitor trend, the popularity score (clipped to 0 to 100) and the competitor price are averaged over the matched competitor products. The number of products behind each signal is in `competitor_products`.
+- The match is thin: the competitor file covers 51 combinations of subcategory and shade, and 33 of them have a single product.
+- The competitor signal is evidence beside the rules. It changes no action and no estimate.
+- A product is flagged `competitor_trend_differs` when its competitor trend and its market trend (`market_sales_trend_12w_pct`) have opposite signs. In this run: 112 of 235 products, 26 of the 67 with an action (fix availability 2, price review 1, delist or mark down 19, relist 3, promote 1). These are listed in the report for discussion with the retailer.
+- Assortment gaps: combinations of subcategory and shade with competitor products, a competitor trend above 0% and no active product of ours. 11 in this run, not sized.
+
+**Pack size is a major assumption for anything that involves a competitor price.** The competitor file has no pack size. A price gap is calculated only where a competitor lists exactly our product name, and it assumes the competitor sells the same pack. For all other products the average competitor price of the matched products is shown as context only (`competitor_avg_price_eur`) and no gap is calculated.
 
 ## Data checks
 
@@ -100,3 +119,5 @@ The run stops before any rule if a file or column is missing, a required field i
 - How is the sales trend calculated? All five actions use the trend as a direction. A different basis could move products across the thresholds.
 - Do inactive products still occupy the shelf space listed for them? If they do, relisting needs no new space and action 3 is not a precondition for action 4.
 - Is there a minimum revenue per product per week? It would replace the bottom-quarter cut-off used for delisting in action 3 with the retailer's own standard.
+- Where competitor and market trends differ for a product, which signal should lead? It decides how much weight the competitor view gets. Today it is shown beside each action and changes none.
+- Which pack sizes do the competitor prices refer to? The competitor data has no pack size. Competitor prices are therefore context only, and the two price gaps assume the same pack as ours.

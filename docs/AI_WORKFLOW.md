@@ -63,6 +63,8 @@ All of these are recorded with reasons in `docs/DECISIONS.md`.
 | €25,154 of the €30,364 relist estimate rests on three products whose figures need checking. | The estimate is tagged "Provisional" in the report (B17). No rule was changed. |
 | An unknown status label or a blank field would silently drop a product from every rule. | Added as a hard failure. |
 | 5 of the 15 relist candidates have an estimate of €0: they already sell at or above the average share while inactive. | Stated in the relist tab and linked to the open question on what "inaktiv" means. No rule was changed. |
+| The competitor trend and a product's own market trend point the same way for 123 of 235 products (52%). As a rule condition the competitor trend would remove every delist candidate. | Competitor data is shown as evidence beside the rules, with a flag where the two differ (B20, B21). |
+| The competitor file has no pack size, and prices against the matched competitor average vary widely. | Price gaps stay limited to exact name matches; other competitor prices are context only (A10, B23). |
 | "Average share" and "bottom quartile" had two possible readings each. | The reading that reproduces the figures in the decisions log is recorded (B8). |
 
 ## How the results were verified
@@ -74,7 +76,7 @@ Checks run by code during the build:
 | Files in `data/` against the original zip | Byte-identical (SHA-256) |
 | Consistency check counts against `DECISIONS.md` section 3 | Match |
 | Count and estimate for every rule against `DECISIONS.md` section 2 | Match, except the price review count, which led to B7 |
-| `pytest` | 26 tests pass |
+| `pytest` | 29 tests pass |
 | Tests fail when a threshold is changed (relist threshold 20% to 30%) | 4 tests fail, as they should |
 | Five kinds of broken input | Each stops the run and writes nothing |
 | Same outputs under pandas 2.2 and pandas 3.0 | Identical files |

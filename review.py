@@ -50,6 +50,7 @@ CONFIG = {
     "r5_revenue_quantile": 0.25,      # R5: revenue below this quantile of all SKUs, recomputed each run
     "r5_trend_max": 0.0,              # R5: channel and market trend must both be below this
     "watch_market_trend_min": 0.15,   # Watchlist: active, low stock, market trend above this
+    "gap_competitor_trend_min": 0.0,  # Assortment gap: competitor trend of the segment above this
     # Order of recommendations in the outputs: sequence of execution (DECISIONS.md section 4)
     "report_order": ["R1", "R4", "R5", "R2", "R3"],
     # An estimate is shown as provisional when products with an open data point carry at least
@@ -354,6 +355,19 @@ def apply_rules(
     context["triggered_counts"] = {rule: int(trigger[rule].sum()) for rule in order}
 
     skus = add_price_gap_notes(skus, competitors, cfg)
+    skus = add_competitor_signals(skus, competitors, cfg)
+    context["assortment_gaps"] = assortment_gaps(skus, competitors, cfg)
+    segments = competitors.groupby(["subcategory", "shade_group"])["trend_score_12w_pct"].mean()
+    context["competitor_segments"] = len(segments)
+    context["competitor_segments_rising"] = int((segments > 0).sum())
+    context["competitor_segments_single"] = int(
+        (competitors.groupby(["subcategory", "shade_group"]).size() == 1).sum()
+    )
+    context["competitor_by_subcategory"] = (
+        competitors.groupby("subcategory")
+        .agg(products=("competitor_product_id", "count"), trend=("trend_score_12w_pct", "mean"))
+        .to_dict("index")
+    )
     return skus, context
 
 
@@ -393,6 +407,77 @@ def add_price_gap_notes(
     return skus
 
 
+# Competitor measures, each averaged over the competitor products of a match (A6)
+COMPETITOR_MEASURES = {
+    "competitor_products": ("competitor_product_id", "count"),
+    "competitor_trend": ("trend_score_12w_pct", "mean"),
+    "competitor_score": ("signal_score_clipped", "mean"),
+    "competitor_avg_price_eur": ("price_eur", "mean"),
+}
+# Match levels, tried in this order: the first that finds competitor products is used
+COMPETITOR_MATCH_LEVELS = [
+    ("exact name", ["name_key"]),
+    ("subcategory and shade", ["subcategory", "shade_group"]),
+    ("shade only", ["shade_group"]),
+]
+
+
+def add_competitor_signals(
+    skus: pd.DataFrame, competitors: pd.DataFrame, cfg: dict = CONFIG
+) -> pd.DataFrame:
+    """Give every SKU the best available competitor signal (A6).
+
+    Match order: exact product name, then same subcategory and shade, then
+    same shade. The signal is evidence beside the rules and never changes an
+    action. A SKU is flagged when the competitor trend and its own market
+    trend point in different directions, so the difference can be discussed.
+    """
+    def clean(names: pd.Series) -> pd.Series:
+        return names.str.strip().str.lower()
+
+    comp = competitors.assign(name_key=clean(competitors["competitor_product_name"]))
+    out = skus.assign(name_key=clean(skus["product_name"]))
+    out["competitor_match"] = ""
+    for column in COMPETITOR_MEASURES:
+        out[column] = float("nan")
+    for label, keys in COMPETITOR_MATCH_LEVELS:
+        found = out[keys].merge(
+            comp.groupby(keys).agg(**COMPETITOR_MEASURES).reset_index(), on=keys, how="left"
+        )
+        found.index = out.index
+        fill = (out["competitor_match"] == "") & found["competitor_products"].notna()
+        for column in COMPETITOR_MEASURES:
+            out.loc[fill, column] = found.loc[fill, column]
+        out.loc[fill, "competitor_match"] = label
+    out["competitor_trend_differs"] = (
+        out["competitor_trend"] * out["market_sales_trend_12w_pct"]
+    ) < 0
+    return out.drop(columns="name_key")
+
+
+def assortment_gaps(
+    skus: pd.DataFrame, competitors: pd.DataFrame, cfg: dict = CONFIG
+) -> pd.DataFrame:
+    """Subcategory and shade combinations that competitors sell, with a rising
+    competitor trend, where we have no active product. Not sized: a lead for
+    supplier follow-up."""
+    segments = (
+        competitors.groupby(["subcategory", "shade_group"])
+        .agg(**COMPETITOR_MEASURES)
+        .reset_index()
+    )
+    active = skus[skus["status"] == cfg["status_active"]]
+    covered = set(zip(active["subcategory"], active["shade_group"]))
+    uncovered = [
+        pair not in covered for pair in zip(segments["subcategory"], segments["shade_group"])
+    ]
+    gaps = segments[uncovered]
+    gaps = gaps[gaps["competitor_trend"] > cfg["gap_competitor_trend_min"]]
+    return gaps.sort_values(
+        ["competitor_trend", "subcategory", "shade_group"], ascending=[False, True, True]
+    ).reset_index(drop=True)
+
+
 # ---------------------------------------------------------------------------
 # 4. Outputs
 # ---------------------------------------------------------------------------
@@ -406,7 +491,9 @@ ACTION_LIST_COLUMNS = [
     "price_eur", "channel_revenue_eur_12w", "channel_units_sold_12w",
     "channel_margin_pct", "channel_sales_trend_12w_pct", "market_revenue_eur_12w",
     "market_sales_trend_12w_pct", "share_of_market", "shelf_space_cm",
-    "price_gap_note", "verify_first", "verify_reason", "watchlist",
+    "price_gap_note", "competitor_match", "competitor_products", "competitor_trend",
+    "competitor_score", "competitor_avg_price_eur", "competitor_trend_differs",
+    "verify_first", "verify_reason", "watchlist",
     "owner", "coordinate_with", "data_date",
 ]
 
@@ -434,6 +521,10 @@ def summarise(skus: pd.DataFrame, context: dict, check_counts: dict, cfg: dict =
             "impact_eur": round(float(group["impact_eur"].sum()), 2),
             "verify_first": int(group["verify_first"].sum()),
             "verify_impact_eur": round(float(group.loc[group["verify_first"], "impact_eur"].sum()), 2),
+            "competitor_differs": int(group["competitor_trend_differs"].sum()),
+            "competitor_differs_impact_eur": round(
+                float(group.loc[group["competitor_trend_differs"], "impact_eur"].sum()), 2
+            ),
         }
     return {
         "sku_count": len(skus),
@@ -455,6 +546,17 @@ def summarise(skus: pd.DataFrame, context: dict, check_counts: dict, cfg: dict =
         "watchlist_count": len(watch),
         "watchlist_revenue": float(watch["channel_revenue_eur_12w"].sum()),
         "checks": dict(check_counts),
+        "competitor_match_counts": {
+            label: int((skus["competitor_match"] == label).sum())
+            for label, _ in COMPETITOR_MATCH_LEVELS
+        },
+        "competitor_segments": context["competitor_segments"],
+        "competitor_segments_rising": context["competitor_segments_rising"],
+        "competitor_segments_single": context["competitor_segments_single"],
+        "competitor_differs_all": int(skus["competitor_trend_differs"].sum()),
+        "competitor_differs_with_action": int(flagged["competitor_trend_differs"].sum()),
+        "assortment_gaps": context["assortment_gaps"].to_dict("records"),
+        "competitor_by_subcategory": context["competitor_by_subcategory"],
     }
 
 
@@ -474,6 +576,11 @@ def build_action_list(
     rows["watchlist"] = yes_no(rows["watchlist"])
     rows["owner"] = OWNER
     rows["coordinate_with"] = rows["rule"].map(lambda rule: RULES[rule]["coordinate_with"])
+    rows["competitor_products"] = rows["competitor_products"].astype(int)
+    rows["competitor_trend"] = rows["competitor_trend"].round(3)
+    rows["competitor_score"] = rows["competitor_score"].round(1)
+    rows["competitor_avg_price_eur"] = rows["competitor_avg_price_eur"].round(2)
+    rows["competitor_trend_differs"] = yes_no(rows["competitor_trend_differs"])
     rows["data_date"] = data_date
     return rows[ACTION_LIST_COLUMNS].reset_index(drop=True)
 
@@ -533,6 +640,16 @@ OPEN_QUESTIONS = [
         "It would replace the bottom-quarter cut-off used for delisting in action 3 with "
         "the retailer's own standard.",
     ),
+    (
+        "Where competitor and market trends differ for a product, which signal should lead?",
+        "It decides how much weight the competitor view gets. Today it is shown beside each "
+        "action and changes none.",
+    ),
+    (
+        "Which pack sizes do the competitor prices refer to?",
+        "The competitor data has no pack size. Competitor prices are therefore context only, "
+        "and the two price gaps assume the same pack as ours.",
+    ),
 ]
 
 
@@ -563,6 +680,28 @@ def check_flag(row: pd.Series) -> str:
     if not row["verify_first"]:
         return ""
     return f'<a class="flag" href="#open" title="{esc(row["verify_reason"])}">! Check first</a>'
+
+
+def match_label(row: pd.Series) -> str:
+    """How the competitor signal of a product was found, and how many products are behind it."""
+    count = int(row["competitor_products"])
+    basis = {
+        "exact name": "same product name",
+        "subcategory and shade": "same segment",
+        "shade only": "same shade",
+    }[row["competitor_match"]]
+    return f"{count} product{'' if count == 1 else 's'}, {basis}"
+
+
+def differs_flag(row: pd.Series) -> str:
+    """Marker for a product whose competitor trend and market trend point in different directions."""
+    if not row["competitor_trend_differs"]:
+        return ""
+    tip = (
+        f"Competitor trend {pct(row['competitor_trend'], signed=True)}, "
+        f"market trend {pct(row['market_sales_trend_12w_pct'], signed=True)}"
+    )
+    return f'<a class="flag flag-alt" href="#open" title="{esc(tip)}">Competitor differs</a>'
 
 
 def slug(rule: str) -> str:
@@ -716,6 +855,8 @@ def threshold_rows(summary: dict, cfg: dict = CONFIG) -> list[tuple[str, str]]:
         ("Promote: market trend above", pct(cfg["r3_market_trend_min"], signed=True)),
         ("Promote: share below", f"{pct(cfg['r3_share_factor'])} of the average share"),
         ("Watchlist: low stock and market trend above", pct(cfg["watch_market_trend_min"], signed=True)),
+        ("Assortment gap: no active product and competitor trend above",
+         pct(cfg["gap_competitor_trend_min"])),
         ("Estimate shown as provisional when open data points carry at least",
          f"{pct(cfg['provisional_share_min'])} of it"),
     ]
@@ -728,6 +869,7 @@ def row_tooltip(row: pd.Series) -> str:
         f"margin {pct(row['channel_margin_pct'], digits=1)}, "
         f"trend in our channel {pct(row['channel_sales_trend_12w_pct'], signed=True)}, "
         f"market trend {pct(row['market_sales_trend_12w_pct'], signed=True)}, "
+        f"competitor trend {pct(row['competitor_trend'], signed=True)} ({match_label(row)}), "
         f"share {pct(row['share'], digits=1)}"
     )
 
@@ -776,6 +918,80 @@ def product_bars(rows: pd.DataFrame, note) -> str:
         }
         for _, row in rows.iterrows()
     ])
+
+
+def trend_compare_html(rows: pd.DataFrame) -> str:
+    """One row per product: its market trend and its competitor trend on a shared scale."""
+    market_col = "market_sales_trend_12w_pct"
+    low = math.floor(min(rows[market_col].min(), rows["competitor_trend"].min(), 0) * 10) / 10
+    high = math.ceil(max(rows[market_col].max(), rows["competitor_trend"].max(), 0) * 10) / 10
+
+    def position(value: float) -> float:
+        return (value - low) / (high - low) * 100
+
+    parts = [
+        '<p class="legend"><span><i class="sw sw-market sw-dot"></i>Market trend of the product</span>'
+        '<span><i class="sw sw-now sw-dot"></i>Competitor trend, best available match</span></p>',
+        '<div class="bar-row"><div></div><div class="cmp-axis">'
+        f'<span style="left:0%">{pct(low, signed=True)}</span>'
+        f'<span style="left:{position(0):.1f}%">0%</span>'
+        f'<span style="left:100%">{pct(high, signed=True)}</span></div><div></div></div>',
+    ]
+    for _, row in rows.iterrows():
+        market, competitor = position(row[market_col]), position(row["competitor_trend"])
+        parts.append(
+            f'<div class="bar-row" title="{esc(row_tooltip(row))}">'
+            f'<div class="bar-label"><span class="sku-id">{esc(row["product_id"])}</span> '
+            f'{esc(row["product_name"])}</div>'
+            '<div class="cmp-track">'
+            f'<i class="zero" style="left:{position(0):.1f}%"></i>'
+            f'<i class="link" style="left:{min(market, competitor):.1f}%;width:{abs(market - competitor):.1f}%"></i>'
+            f'<i class="dot dot-m" style="left:{market:.1f}%"></i>'
+            f'<i class="dot dot-c" style="left:{competitor:.1f}%"></i></div>'
+            f'<div class="bar-note">Market {pct(row[market_col], signed=True)}, competitors '
+            f'{pct(row["competitor_trend"], signed=True)} {differs_flag(row)}'
+            f'<br><span class="sub">{esc(match_label(row))}</span></div></div>'
+        )
+    return '<div class="bars">' + "".join(parts) + "</div>"
+
+
+def competitor_learning(number: int, rule: str, group: pd.DataFrame, data_date: str) -> str:
+    """The competitor view of an action: does it point the same way as the market trend?"""
+    count = len(group)
+    differs = int(group["competitor_trend_differs"].sum())
+    single = int((group["competitor_products"] == 1).sum())
+    shade_only = int((group["competitor_match"] == "shade only").sum())
+    points = []
+    if rule == "R5" and differs == count:
+        title = (
+            f"Competitors are growing in the segments of all {count} products, so the decline "
+            "is specific to these products"
+        )
+        points.append(
+            "These products are falling in our channel and in their own market, while "
+            "competitor products in the same subcategory and shade are rising. That argues for "
+            "replacing them within the segment, not for leaving the segment. It is listed "
+            'under <a href="#open">Open points to clarify</a>.'
+        )
+    elif differs == 0:
+        title = f"Competitor data points the same way as the market trend for all {count} products"
+    else:
+        title = (
+            f"Competitor data agrees with the market trend for {count - differs} of the {count} "
+            f"products and differs for {differs}"
+        )
+        points.append(
+            f"The {differs} products where the two differ keep their action. They are listed "
+            'under <a href="#open">Open points to clarify</a>, to discuss with the retailer.'
+        )
+    thin = f"{single} of the {count} competitor signals rest on a single competitor product"
+    if shade_only:
+        thin += (
+            f", and {shade_only} are matched by shade only because no competitor product shares "
+            "the subcategory"
+        )
+    points.append(thin + ". Read them as a prompt to look closer, not as proof.")
+    return learning(number, title, trend_compare_html(group), points, data_date)
 
 
 def shelf_html(summary: dict) -> str:
@@ -961,8 +1177,8 @@ def price_gap_table(skus: pd.DataFrame) -> str:
     )
 
 
-def subcategory_table(skus: pd.DataFrame, cfg: dict = CONFIG) -> str:
-    """Where the actions sit: one row per subcategory."""
+def subcategory_table(skus: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> str:
+    """Where the actions sit: one row per subcategory, with the competitor trend beside it."""
     header = "".join(
         f'<th class="num wrap">{n}. {esc(SHORT_LABELS[rule])}</th>'
         for n, rule in enumerate(cfg["report_order"], start=1)
@@ -973,6 +1189,7 @@ def subcategory_table(skus: pd.DataFrame, cfg: dict = CONFIG) -> str:
     for name in order:
         group = grouped.get_group(name)
         revenue, market = group["channel_revenue_eur_12w"].sum(), group["market_revenue_eur_12w"].sum()
+        competitor = summary["competitor_by_subcategory"].get(name)
         counts = "".join(
             f'<td class="num">{int((group["rule"] == rule).sum()) or "–"}</td>'
             for rule in cfg["report_order"]
@@ -980,11 +1197,14 @@ def subcategory_table(skus: pd.DataFrame, cfg: dict = CONFIG) -> str:
         body.append(
             f"<tr><td class='nowrap'>{esc(name)}</td><td class='num'>{len(group)}</td>"
             f"<td class='num'>{eur(revenue)}</td><td class='num'>{pct(revenue / market, digits=1)}</td>"
+            f"<td class='num'>{pct(competitor['trend'], signed=True) if competitor else '–'}"
+            f"<br><span class='sub'>{competitor['products'] if competitor else 0} products</span></td>"
             f"{counts}</tr>"
         )
     return (
         '<div class="table-wrap"><table><thead><tr><th>Subcategory</th><th class="num">Products</th>'
         '<th class="num wrap">Revenue, 12 weeks</th><th class="num wrap">Share of market</th>'
+        '<th class="num wrap">Competitor trend</th>'
         f"{header}</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
     )
 
@@ -1020,29 +1240,41 @@ def action_products_table(rule: str, rows: pd.DataFrame, cfg: dict = CONFIG) -> 
 
     ours, market = trend("channel_sales_trend_12w_pct"), trend("market_sales_trend_12w_pct")
     estimate = lambda row: bar_cell(row["impact_eur"], top)  # noqa: E731
+    competitor = ("Competitor trend", lambda row: (
+        f'<td class="num">{pct(row["competitor_trend"], signed=True)}'
+        f'<br><span class="sub">{esc(match_label(row))}</span></td>'
+    ))
     columns = {
-        "R1": [("Market trend", market), ("Our sales trend", ours), ("Revenue at risk", estimate)],
+        "R1": [
+            ("Market trend", market), competitor, ("Our sales trend", ours),
+            ("Revenue at risk", estimate),
+        ],
         "R4": [
             ("Margin", lambda row: f'<td class="num">{pct(row["channel_margin_pct"], digits=1)}</td>'),
-            ("Our sales trend", ours), ("Market trend", market),
-            ("Revenue, 12 weeks", money("channel_revenue_eur_12w")), ("Estimate", estimate),
+            ("Our sales trend", ours), ("Market trend", market), competitor,
+            ("Our price", lambda row: f'<td class="num">€{row["price_eur"]:.2f}</td>'),
+            ("Competitor price, average", lambda row: (
+                f'<td class="num">€{row["competitor_avg_price_eur"]:.2f}</td>'
+            )),
+            ("Estimate", estimate),
         ],
         "R5": [
             ("Action", lambda row: f'<td class="nowrap">{esc(row["action"])}</td>'),
-            ("Our sales trend", ours), ("Market trend", market),
+            ("Our sales trend", ours), ("Market trend", market), competitor,
             ("Shelf freed", lambda row: f'<td class="num">{row["shelf_space_cm"]} cm</td>'),
             ("Revenue given up", estimate),
         ],
         "R2": [
-            ("Market trend", market), ("Market revenue, 12 weeks", money("market_revenue_eur_12w")),
+            ("Market trend", market), competitor,
+            ("Market revenue, 12 weeks", money("market_revenue_eur_12w")),
             ("Our revenue, 12 weeks", money("channel_revenue_eur_12w")),
             ("Shelf needed", lambda row: f'<td class="num">{row["shelf_space_cm"]} cm</td>'),
             ("Estimate", estimate),
         ],
         "R3": [
             ("Our share", lambda row: f'<td class="num">{pct(row["share"], digits=1)}</td>'),
-            ("Market trend", market), ("Our revenue, 12 weeks", money("channel_revenue_eur_12w")),
-            ("Estimate", estimate),
+            ("Market trend", market), competitor,
+            ("Our revenue, 12 weeks", money("channel_revenue_eur_12w")), ("Estimate", estimate),
         ],
     }[rule]
 
@@ -1052,6 +1284,8 @@ def action_products_table(rule: str, rows: pd.DataFrame, cfg: dict = CONFIG) -> 
     body = []
     for _, row in rows.iterrows():
         notes = [check_flag(row)] if row["verify_first"] else []
+        if row["competitor_trend_differs"]:
+            notes.append(differs_flag(row))
         if row["price_gap_note"]:
             notes.append(f'Price gap: {esc(row["price_gap_note"].replace("EUR ", "€"))}')
         for other in row["rules_triggered"].split(", "):
@@ -1075,6 +1309,8 @@ def watchlist_section(skus: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> 
     rows = "".join(
         f'<tr title="{esc(row_tooltip(row))}">{product_cell(row)}'
         f"<td class='num'>{pct(row['market_sales_trend_12w_pct'], signed=True)}</td>"
+        f"<td class='num'>{pct(row['competitor_trend'], signed=True)}"
+        f"<br><span class='sub'>{esc(match_label(row))}</span></td>"
         f"<td class='num'>{pct(row['channel_sales_trend_12w_pct'], signed=True)}</td>"
         f"<td class='num'>{eur(row['channel_revenue_eur_12w'])}</td>"
         f"<td>{esc(str(int(row['recommendation'])) + '. ' + row['action']) if row['rule'] else 'None yet'}</td></tr>"
@@ -1087,8 +1323,35 @@ def watchlist_section(skus: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> 
         f"they earned {eur(summary['watchlist_revenue'])} in 12 weeks, so they are the next "
         "restock candidates if stock runs out.</p>"
         '<div class="table-wrap"><table><thead><tr><th>Product</th><th class="num wrap">Market trend</th>'
+        '<th class="num wrap">Competitor trend</th>'
         '<th class="num wrap">Our sales trend</th><th class="num wrap">Revenue, 12 weeks</th>'
         f"<th>Current action</th></tr></thead><tbody>{rows}</tbody></table></div>"
+    )
+
+
+def assortment_gaps_section(summary: dict) -> str:
+    gaps = summary["assortment_gaps"]
+    if not gaps:
+        return ""
+    rows = "".join(
+        f"<tr><td>{esc(gap['subcategory'])}</td><td>{esc(gap['shade_group'])}</td>"
+        f"<td class='num'>{gap['competitor_products']}</td>"
+        f"<td class='num'>{pct(gap['competitor_trend'], signed=True)}</td>"
+        f"<td class='num'>{gap['competitor_score']:.0f}</td>"
+        f"<td class='num'>€{gap['competitor_avg_price_eur']:.2f}</td></tr>"
+        for gap in gaps
+    )
+    return (
+        "<h3>Assortment gaps: rising segments without an active product</h3>"
+        f"<p>No action yet. Competitors sell in these {len(gaps)} combinations of subcategory "
+        "and shade, their trend is rising, and we have no active product there. They are leads "
+        "for supplier follow-up and are not sized. Most rest on a single competitor product, "
+        "and the competitor prices are for unknown pack sizes.</p>"
+        '<div class="table-wrap"><table><thead><tr><th>Subcategory</th><th>Shade</th>'
+        '<th class="num wrap">Competitor products</th><th class="num wrap">Competitor trend</th>'
+        '<th class="num wrap">Popularity score, 0 to 100</th>'
+        '<th class="num wrap">Competitor price, average</th></tr></thead>'
+        f"<tbody>{rows}</tbody></table></div>"
     )
 
 
@@ -1139,7 +1402,7 @@ def learnings_html(
              "they hold more revenue than the products already out of stock."],
             data_date,
         )
-        return first + second
+        return first + second + competitor_learning(3, rule, group, data_date)
 
     if rule == "R4":
         median = active["channel_margin_pct"].median()
@@ -1164,17 +1427,21 @@ def learnings_html(
         if len(gaps):
             gap_list = " and ".join(pct(v, signed=True) for v in gaps["price_gap_pct"])
             second = learning(
-                2, f"Where prices can be compared like for like, the gaps are large: {gap_list}",
+                2, f"Where a competitor lists the same product name, the price gaps are large: {gap_list}",
                 price_gap_table(skus),
                 [
                     f"Only {len(gaps)} products have an exact match in the competitor data, so "
                     "this is a signal to follow up, not a price benchmark.",
+                    "The competitor data does not state pack size. The gaps hold only if the "
+                    "competitor sells the same pack as ours.",
                     "Both products have their own action. The price gap is a note for the "
                     "price review.",
+                    "For the candidates above, the average competitor price of the matched "
+                    "products is shown as context only, for the same reason.",
                 ],
                 data_date,
             )
-        return first + second
+        return first + second + competitor_learning(3 if second else 2, rule, group, data_date)
 
     if rule == "R5":
         shelf = group["shelf_space_cm"].sum()
@@ -1208,7 +1475,7 @@ def learnings_html(
              'occupy their shelf space, which is an <a href="#open">open point</a>.'],
             data_date,
         )
-        return first + second
+        return first + second + competitor_learning(3, rule, group, data_date)
 
     if rule == "R2":
         inactive = skus[skus["status"] == cfg["status_inactive"]]
@@ -1250,7 +1517,7 @@ def learnings_html(
              "have sold through."],
             data_date,
         )
-        return first + second
+        return first + second + competitor_learning(3, rule, group, data_date)
 
     # R3
     points = [
@@ -1275,7 +1542,7 @@ def learnings_html(
         product_bars(group, lambda row: f"Share {pct(row['share'], digits=1)}"),
         second_points, data_date,
     )
-    return first + second
+    return first + second + competitor_learning(3, rule, group, data_date)
 
 
 # --- The tabs ------------------------------------------------------------------
@@ -1299,8 +1566,9 @@ attention, and what to do next.</p>
 with the decision each one needs.</td><td>Brief your VP and agree priorities.</td></tr>
 <tr><td><a href="#actions">Actions</a></td><td>One page per action. First the products to act on,
 then what we learned, with the supporting charts.</td><td>Work through an action with your team.</td></tr>
-<tr><td><a href="#open">Open points to clarify</a></td><td>Data points to confirm and questions to
-answer before acting.</td><td>Agree who clarifies what.</td></tr>
+<tr><td><a href="#open">Open points to clarify</a></td><td>Data points to confirm, products where
+competitor and market trends differ, and questions to answer before acting.</td><td>Agree who
+clarifies what.</td></tr>
 <tr><td><a href="#list">Full action list</a></td><td>All {summary['action_count']} products with an
 action in one table, with a filter per action.</td><td>Look up a product or hand over the list.</td></tr>
 </tbody></table></div>
@@ -1319,6 +1587,14 @@ then grow it.</li>
 shown side by side and not added up.</li>
 <li>Each product appears under one action only.</li>
 <li>"Provisional" marks an estimate that depends on open data points.</li>
+<li>"Market trend" comes from the sales data of the product itself. "Competitor trend" comes from
+the competitor data: for the same product name where there is one, otherwise for the same
+subcategory and shade ("same segment"), otherwise for the same shade. The number of competitor
+products behind it is always shown.</li>
+<li>"Competitor differs" marks a product whose competitor trend and market trend point in
+different directions. The action stays, and the difference is an open point.</li>
+<li>Competitor prices come without pack size. They are shown as context and compared only where
+a competitor lists the same product name.</li>
 <li>The product list is also available as <code>action_list.csv</code>. Assumptions and calculations
 are documented in <code>{METHOD_FILE}</code>. Both sit next to this file.</li>
 </ul>
@@ -1368,7 +1644,8 @@ def summary_tab(skus: pd.DataFrame, summary: dict, texts: dict, cfg: dict = CONF
         "be confirmed.",
         "Decide delisting and relisting together at the next range review: delisting frees "
         f"{summary['shelf_freed_now_cm']} cm of shelf now, and relisting needs "
-        f"{summary['shelf_needed_cm']} cm.",
+        f"{summary['shelf_needed_cm']} cm. Review the {len(summary['assortment_gaps'])} "
+        "assortment gaps with suppliers in the same round.",
         f"Agree placement and promotion slots for the {rules['R3']['skus']} products with a weak share.",
     ]
     return f"""
@@ -1384,9 +1661,22 @@ of stock, which puts {eur(rules['R1']['impact_eur'])} of 12-week revenue at risk
 {footnote}
 <h2>Proposed sequence</h2>
 <ol class="plain">{''.join(f'<li>{step}</li>' for step in steps)}</ol>
+<h2>What competitor data adds</h2>
+<ul class="plain">
+<li>Competitor products are trending up in {summary['competitor_segments_rising']} of the
+{summary['competitor_segments']} combinations of subcategory and shade they are sold in, which
+points to growing demand in the category.</li>
+<li>For {summary['action_count'] - summary['competitor_differs_with_action']} of the
+{summary['action_count']} products with an action, the competitor trend points the same way as
+the product's market trend. For {summary['competitor_differs_with_action']} it differs. These
+keep their action and are listed under <a href="#open">Open points to clarify</a>.</li>
+<li>Competitors sell in {len(summary['assortment_gaps'])} rising combinations where we have no
+active product. They are listed as assortment gaps under <a href="#actions-relist">action 4</a>.</li>
+</ul>
 <h2>Where the actions sit</h2>
-<p>Number of products per action in each subcategory, largest subcategory first.</p>
-{subcategory_table(skus, cfg)}
+<p>Number of products per action in each subcategory, largest subcategory first, with the average
+trend of competitor products in that subcategory.</p>
+{subcategory_table(skus, summary, cfg)}
 """
 
 
@@ -1405,7 +1695,17 @@ def actions_tab(
         text = texts[rule]
         group = flagged[flagged["rule"] == rule]
         provisional = ' <a class="flag" href="#open">Provisional</a>' if text["provisional"] else ""
-        extra = watchlist_section(skus, summary, cfg) if rule == "R1" else ""
+        price_note = ""
+        if rule == "R4":
+            price_note = (
+                '<p class="source">Competitor prices are averages over the matched competitor '
+                "products and come without pack size. They are context, not a benchmark.</p>"
+            )
+        extra = ""
+        if rule == "R1":
+            extra = watchlist_section(skus, summary, cfg)
+        if rule == "R2":
+            extra = assortment_gaps_section(summary)
         panels.append(
             f'<section data-subpanel="{slug(rule)}">'
             '<div class="action-head"><div>'
@@ -1416,7 +1716,7 @@ def actions_tab(
             "<h2>What to do</h2>"
             f'<p><strong>{esc(text["decision"])}</strong> The {len(group)} products are listed '
             "with the largest estimate first.</p>"
-            f"{action_products_table(rule, group, cfg)}{extra}"
+            f"{action_products_table(rule, group, cfg)}{price_note}{extra}"
             "<h2>What we learned</h2>"
             f"{learnings_html(rule, skus, summary, data_date, cfg)}"
             "</section>"
@@ -1439,14 +1739,29 @@ def open_points_tab(skus: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> st
         if rules[rule]["verify_first"] == 0
     ]
     unaffected = f" Actions {' and '.join(clear)} have no open data point." if clear else ""
+    differing = flagged_in_order(skus)
+    differing = differing[differing["competitor_trend_differs"]]
+    differ_rows = "".join(
+        f"<tr>{product_cell(row)}"
+        f"<td class='nowrap'>{int(row['recommendation'])}. {esc(row['action'])}</td>"
+        f"<td class='num'>{pct(row['market_sales_trend_12w_pct'], signed=True)}</td>"
+        f"<td class='num'>{pct(row['competitor_trend'], signed=True)}</td>"
+        f"<td>{esc(match_label(row))}</td></tr>"
+        for _, row in differing.iterrows()
+    )
+    per_action = ", ".join(
+        f"{rules[rule]['competitor_differs']} in {SHORT_LABELS[rule].lower()}"
+        for rule in cfg["report_order"] if rules[rule]["competitor_differs"]
+    )
     question_rows = "".join(
         f"<tr><td><strong>{esc(question)}</strong></td><td>{esc(why)}</td></tr>"
         for question, why in OPEN_QUESTIONS
     )
     return f"""
 <h1>Open points to clarify before acting</h1>
-<p class="lead">Two kinds of points are open: sales figures to confirm for
-{summary['verify_count']} products, and {len(OPEN_QUESTIONS)} questions about how the retailer
+<p class="lead">Three kinds of points are open: sales figures to confirm for
+{summary['verify_count']} products, {summary['competitor_differs_with_action']} products where
+competitor and market trends differ, and {len(OPEN_QUESTIONS)} questions about how the retailer
 works.</p>
 <h2>Data points to confirm</h2>
 <p>For {summary['verify_count']} products the sales figures contradict each other.
@@ -1455,6 +1770,17 @@ carry {eur(rules['R2']['verify_impact_eur'])} of the relist estimate and
 {eur(rules['R3']['verify_impact_eur'])} of the promote estimate.{unaffected}</p>
 <div class="table-wrap"><table><thead><tr><th>Product</th><th>Action</th><th>What to confirm</th>
 <th class="num wrap">Estimate that depends on it</th></tr></thead><tbody>{confirm_rows}</tbody></table></div>
+<h2>Where competitor and market trends differ</h2>
+<p>For {summary['competitor_differs_with_action']} of the {summary['action_count']} products with
+an action, competitor products are trending in the opposite direction to the product's own market
+trend: {per_action}. The actions stand. Each difference is a point to discuss with the retailer
+as a next step, most of all for the delist and markdown products, where competitors in the same
+segment are growing.</p>
+<div class="table-wrap"><table><thead><tr><th>Product</th><th>Action</th>
+<th class="num wrap">Market trend</th><th class="num wrap">Competitor trend</th>
+<th>Competitor trend is based on</th></tr></thead><tbody>{differ_rows}</tbody></table></div>
+<p class="source">"Same segment" means the same subcategory and shade. Across all
+{summary['sku_count']} products the two trends differ for {summary['competitor_differs_all']}.</p>
 <h2>Questions for the retailer</h2>
 <div class="table-wrap"><table class="guide"><thead><tr><th>Question</th><th>Why it matters</th></tr></thead>
 <tbody>{question_rows}</tbody></table></div>
@@ -1475,6 +1801,11 @@ def action_table(rows: pd.DataFrame, summary: dict, cfg: dict = CONFIG) -> str:
         notes = []
         if row["verify_first"]:
             notes.append(f'{check_flag(row)} {esc(row["verify_reason"])}')
+        if row["competitor_trend_differs"]:
+            notes.append(
+                f'{differs_flag(row)} competitors {pct(row["competitor_trend"], signed=True)}, '
+                f'market {pct(row["market_sales_trend_12w_pct"], signed=True)}'
+            )
         if row["price_gap_note"]:
             notes.append(f'Price gap: {esc(row["price_gap_note"].replace("EUR ", "€"))}')
         for other in row["rules_triggered"].split(", "):
@@ -1597,6 +1928,15 @@ background:var(--lilac);border-radius:3px 0 0 3px}
 .flag{display:inline-block;font-size:.8rem;font-weight:500;line-height:1.55;padding:0 8px;border-radius:6px;
 background:var(--lilac-soft);color:var(--lilac-ink);white-space:nowrap;text-decoration:none;vertical-align:middle;
 letter-spacing:0}
+.flag-alt{background:var(--orange-soft);color:var(--orange-ink)}
+.cmp-track{position:relative;height:18px;margin:0 8px}
+.cmp-track .zero{position:absolute;top:0;bottom:0;width:1px;background:#8d877e}
+.cmp-track .link{position:absolute;top:8px;height:2px;background:var(--line-strong)}
+.cmp-track .dot{position:absolute;top:3px;width:12px;height:12px;margin-left:-6px;border-radius:50%;
+box-shadow:0 0 0 2px var(--paper)}
+.dot-m,.sw-market{background:#8d877e}.dot-c{background:var(--lilac)}
+.cmp-axis{position:relative;height:16px;margin:0 8px;font-size:.78rem;color:var(--muted)}
+.cmp-axis span{position:absolute;transform:translateX(-50%);white-space:nowrap}
 .legend{display:flex;flex-wrap:wrap;gap:6px 22px;font-size:.88rem;color:var(--muted);margin:6px 0 12px;max-width:none}
 .sw{display:inline-block;width:12px;height:12px;border-radius:2px;margin-right:7px;vertical-align:-1px}
 .sw-dot{border-radius:50%}
@@ -1836,6 +2176,50 @@ def build_method_doc(summary: dict, data_date: str, cfg: dict = CONFIG) -> str:
         "- Competitor data is matched by exact product name only. A price gap is noted when the "
         f"prices differ by more than {pct(cfg['r4b_price_gap'])}. "
         f"{summary['price_gap_notes']} such notes exist in this run.",
+        "",
+        "## Competitor data",
+        "",
+        "Every product is matched to the competitor file at the best available level. The "
+        "first level that finds competitor products is used:",
+        "",
+        "| Match level | Products |",
+        "|---|---|",
+    ]
+    lines += [
+        f"| {label.capitalize()} | {count} |"
+        for label, count in summary["competitor_match_counts"].items()
+    ]
+    lines += [
+        "",
+        "- The competitor trend, the popularity score (clipped to "
+        f"{cfg['score_min']} to {cfg['score_max']}) and the competitor price are averaged over "
+        "the matched competitor products. The number of products behind each signal is in "
+        "`competitor_products`.",
+        "- The match is thin: the competitor file covers "
+        f"{summary['competitor_segments']} combinations of subcategory and shade, and "
+        f"{summary['competitor_segments_single']} of them have a single product.",
+        "- The competitor signal is evidence beside the rules. It changes no action and no "
+        "estimate.",
+        "- A product is flagged `competitor_trend_differs` when its competitor trend and its "
+        "market trend (`market_sales_trend_12w_pct`) have opposite signs. In this run: "
+        f"{summary['competitor_differs_all']} of {summary['sku_count']} products, "
+        f"{summary['competitor_differs_with_action']} of the {summary['action_count']} with an "
+        "action ("
+        + ", ".join(
+            f"{RULES[rule]['name'].lower()} {summary['rules'][rule]['competitor_differs']}"
+            for rule in cfg["report_order"]
+        )
+        + "). These are listed in the report for discussion with the retailer.",
+        "- Assortment gaps: combinations of subcategory and shade with competitor products, a "
+        f"competitor trend above {pct(cfg['gap_competitor_trend_min'])} and no active product "
+        f"of ours. {len(summary['assortment_gaps'])} in this run, not sized.",
+        "",
+        "**Pack size is a major assumption for anything that involves a competitor price.** "
+        "The competitor file has no pack size. A price gap is calculated only where a "
+        "competitor lists exactly our product name, and it assumes the competitor sells the "
+        "same pack. For all other products the average competitor price of the matched "
+        "products is shown as context only (`competitor_avg_price_eur`) and no gap is "
+        "calculated.",
         "",
         "## Data checks",
         "",
