@@ -111,5 +111,5 @@ docs/AI_WORKFLOW.md  how AI was used and how the results were checked
 ```
 
 `review.py` runs in this order: load and validate, consistency checks, rules, action list,
-report, method file. Everything up to and including the action list is in the first 480 lines.
+report, method file. Everything up to and including the action list is in the first 590 lines.
 The report layout follows, and `main()` at the end shows the whole run in order.
