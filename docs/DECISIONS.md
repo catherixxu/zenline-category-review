@@ -13,7 +13,8 @@ All counts and euro figures below were computed from the three provided CSV file
 | A3 | Channel revenue ÷ market revenue is our share of that product's market. Overall share is 6.3%. | Basis for "weak channel execution". |
 | A4 | `inaktiv` means being phased out but still selling down stock (35 of 38 still sell, €191,360 in 12 weeks). | Inactive SKUs are reviewed only for relisting. |
 | A5 | The data covers roughly April to June 2026 (signals are dated 1 July 2026). | The 30 seasonal SKUs get markdown, not delist. |
-| A6 | Competitor signals are used at subcategory and shade level, and by product name only for the 2 exact matches. Scores are clipped to 0–100. | No per-SKU price matching beyond exact matches. |
+| A6 | Every SKU is matched to the competitor file at the best available level: exact product name (2 SKUs), otherwise the same subcategory and shade (175), otherwise the same shade (58). The competitor trend and popularity score are averaged over the matched competitor products. Scores are clipped to 0–100. The signal is evidence beside the rules and never changes an action (B20). | Every SKU carries a competitor signal with its match level and the number of competitor products behind it. |
+| A10 | The competitor file has no pack size. A competitor price is compared with ours only for the 2 exact name matches, and even there the comparison assumes the competitor sells the same pack. At subcategory and shade level the average competitor price is shown as context only, never as a gap. | Competitor pricing is a weak signal in this data. It prompts a check and sizes nothing. |
 | A7 | Euro impact is a simple run-rate estimate with the formula shown. No price elasticity. | Figures are labelled as estimates. |
 | A8 | Consistency checks run on every row. Flagged rows keep their action but carry a "verify first" marker. | See section 3. |
 | A9 | One primary action per SKU. Where rules overlap, precedence is R1, R2, R3, R4, R5. | Avoids double counting. Precedence is separate from the presentation order in section 4. |
@@ -31,7 +32,7 @@ All counts and euro figures below were computed from the three provided CSV file
 
 R4 triggers on 16 SKUs (€3,526). Five of them have an earlier primary action under A9: HC0043, HC0053 and HC0070 are restock first (R1), and HC0061 and HC0094 are promote first (R3). The report counts the 11 and mentions the 5 (B7).
 
-R4b is a secondary note. It does not change a SKU's primary action, and it is shown as evidence in the price review. On this data it catches:
+R4b is a secondary note. It does not change a SKU's primary action, and it is shown as evidence in the price review. It assumes the competitor sells the same pack size, which the competitor file does not state (A10). On this data it catches:
 - HC0006 Garnier Olia Copper Glow: €4.77 against €7.95 at rossmann.de, 40% below. Primary action R1.
 - HC0007 Manic Panic High Voltage Ultra Violet: €18.92 against €11.99 at amazon.de, 58% above. Primary action R2.
 
@@ -81,6 +82,8 @@ Recommendations 3 and 4 are presented as a linked pair. Delisting the 15 Evergre
 - How is the trend calculated (A1)?
 - Do inactive SKUs still occupy the shelf space listed in the metadata?
 - Is there a minimum revenue per SKU per week that should replace the relative bottom-quartile cut-off in R5 (B2)?
+- Where the competitor trend and the market trend of a product point in different directions, which signal should lead (B21)?
+- Which pack sizes do the competitor prices refer to (A10)?
 
 ## 7. Build decisions
 
@@ -105,3 +108,9 @@ Recommendations 3 and 4 are presented as a linked pair. Delisting the 15 Evergre
 | B17 | An estimate is tagged "Provisional" when products with an open data point carry at least 10% of it. On this data that is relist (€25,154 of €30,364) and promote (€6,261 of €20,486). | The executive summary carries no commentary on the analysis, but it must not present these two figures as firm. |
 | B18 | The watchlist is a section inside the Restock action. The subcategory table sits at the end of the executive summary. Checks are reframed as "Open points to clarify": data points to confirm and questions for the retailer, each with why it matters. | The watchlist is about stock, so it sits with the stock action. Open points read as what to clarify next, not as a list of data errors. The subcategory table answers the "subcategories" part of the customer brief. |
 | B19 | No output carries a creation date. The report, the CSV and the method file show the data date only. | The same data gives identical files on any day, so a rerun can be compared with the previous one byte for byte. The data date identifies the data drop, and the output folder identifies the run. Amends B1. |
+| B20 | Competitor data is evidence beside the rules, not a condition in them. Every SKU shows its competitor trend, the match level and the number of competitor products behind it, in the report, the action list and the method file. The five rules and their estimates are unchanged. | The competitor trend and the SKU-level market trend point the same way for only 123 of 235 SKUs (52%), so they are independent signals. As a rule condition the competitor trend would remove every delist candidate, because competitor trends are rising in 38 of the 51 subcategory and shade combinations. |
+| B21 | A SKU is flagged "Competitor differs" when its competitor trend and its market trend have opposite signs. The flag does not change the action. Flagged SKUs with an action are listed under "Open points to clarify" for discussion with the retailer. On this data: 112 of 235 SKUs, 26 of the 67 with an action (restock 2, price review 1, delist or mark down 19, relist 3, promote 1). | Two signals that disagree are a question for the retailer, not something to settle by rule. For the 19 delist and markdown SKUs it changes the reading: the product is declining, the segment is not, so the option is to replace within the segment. |
+| B22 | Where a SKU has no competitor product in its subcategory and shade, the match falls back to shade only (58 SKUs, 20 of them with an action). The match level is shown beside the signal. | A shade-level signal is weaker but still informative. Showing the level lets the reader weigh it. |
+| B23 | Price gaps stay limited to the 2 exact name matches. The Price tab shows the average competitor price of the matched products as context, without a gap percentage. | The competitor file has no pack size (A10). Our prices against the matched competitor average range from about 50% below to 35% above for the middle half of SKUs, which says more about pack sizes than about pricing. |
+| B24 | Assortment gaps are a section inside the Relist action: subcategory and shade combinations that competitors sell, with a rising competitor trend, where we have no active SKU. 11 on this data, not sized. | Covers the "assortment gap or supplier follow-up for rising competitor trends" action in the customer brief. It sits with relist because both add to the range. |
+| B25 | The number of competitor products behind each signal is always shown. 33 of the 51 subcategory and shade combinations have a single competitor product, and 37 of the 67 signals on SKUs with an action rest on one product. | A one-product signal should be visible as such. |
