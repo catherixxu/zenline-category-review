@@ -25,7 +25,7 @@ How AI was used in this take-home, and how the results were checked.
 
 ## What the AI did
 
-- Wrote `review.py`, `test_review.py`, the report layout and this repository's structure.
+- Wrote `src/review.py`, `tests/test_review.py`, the report layout and this repository's structure.
 - Reproduced every figure in the decisions log by code before building on it, and reported each
   difference instead of adjusting a rule.
 - Set out the options where a choice was open.

@@ -19,7 +19,7 @@ Requires Python 3.10 or newer. Tested with Python 3.13 and pandas 2.2 and 3.0.
 
 ```
 pip install -r requirements.txt
-python review.py --input data --output output
+python src/review.py --input data --output output
 pytest
 ```
 
@@ -39,9 +39,9 @@ message and writes nothing.
 | `output/assumptions_and_calculations.md` | Anyone checking the numbers | For each action the rule, the data fields used, the estimate formula and the owner, plus the thresholds and data checks of the run |
 
 The report is one self-contained file and opens offline in any browser. It uses Zenline AI's
-visual language. The logo is embedded from `assets/zenline-logo.png`. Zenline's typeface is
-licensed and not included; the report falls back to Inter, embedded from `assets/` under the
-SIL Open Font License.
+visual language. The logo is embedded from `src/assets/zenline-logo.png`. Zenline's typeface is
+licensed and not included; the report falls back to Inter, embedded from `src/assets/` under
+the SIL Open Font License.
 
 ## Assumptions
 
@@ -94,22 +94,27 @@ decision, is in [docs/DECISIONS.md](docs/DECISIONS.md). The formula behind each 
 - **Refine the estimates.** Add price elasticity and the effect of one action on another.
 - **Run it on a schedule.** One run per data drop into a dated folder, with the report sent to
   the category manager.
-- **Separate layout from logic.** Move the report layout out of `review.py` once the format is
+- **Separate layout from logic.** Move the report layout out of `src/review.py` once the format is
   stable.
 
 ## Where things are
 
 ```
-review.py            the whole pipeline; thresholds sit in the CONFIG block at the top
-test_review.py       29 tests: known cases, figures, hard failures, outputs
-data/                the provided files, untouched, plus the task text
-output/              the results of the last run
-assets/              logo and font embedded into the report
-index.html           forwards the GitHub Pages address to the report
-docs/DECISIONS.md    assumptions, rules, thresholds and every decision, with reasons
-docs/AI_WORKFLOW.md  how AI was used and how the results were checked
+README.md              this file
+requirements.txt       pandas and pytest
+index.html             forwards the GitHub Pages address to the report
+src/
+  review.py            the whole pipeline; thresholds sit in the CONFIG block at the top
+  assets/              logo and font embedded into the report
+tests/
+  test_review.py       29 tests: known cases, figures, hard failures, outputs
+data/                  the provided files, untouched, plus the task text
+output/                the results of the last run: report, action list, method file
+docs/
+  DECISIONS.md         assumptions, rules, thresholds and every decision, with reasons
+  AI_WORKFLOW.md       how AI was used and how the results were checked
 ```
 
-`review.py` runs in this order: load and validate, consistency checks, rules, action list,
+`src/review.py` runs in this order: load and validate, consistency checks, rules, action list,
 report, method file. Everything up to and including the action list is in the first 590 lines.
 The report layout follows, and `main()` at the end shows the whole run in order.

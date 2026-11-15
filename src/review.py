@@ -2,7 +2,7 @@
 """Zenline category review: Beauty > Hair Coloration.
 
 Usage:
-    python review.py --input data --output output
+    python src/review.py --input data --output output
 
 Steps: load and validate -> consistency checks -> rules -> outputs.
 Every rule and threshold is documented in docs/DECISIONS.md.
@@ -2034,7 +2034,7 @@ ASSETS = Path(__file__).parent / "assets"
 def font_face_css() -> str:
     """Embed the Inter font so the report looks the same offline.
 
-    Inter is open licence (see assets/INTER-LICENSE.txt). If the file is
+    Inter is open licence (see src/assets/INTER-LICENSE.txt). If the file is
     missing the report falls back to the system font.
     """
     font = ASSETS / "inter-latin-variable.woff2"
@@ -2048,7 +2048,7 @@ def font_face_css() -> str:
 
 
 def logo_html() -> str:
-    """The Zenline logo for the top bar, from assets/zenline-logo.png.
+    """The Zenline logo for the top bar, from src/assets/zenline-logo.png.
 
     The file is dark on a transparent background, so the style sheet inverts it
     to white for the dark bar. If the file is missing, no logo is shown.

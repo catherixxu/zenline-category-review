@@ -1,4 +1,4 @@
-"""Tests for review.py. Run with: pytest
+"""Tests for src/review.py. Run with: pytest (from the repository root)
 
 The expected values are the figures recorded in docs/DECISIONS.md for the
 provided data drop. If a rule or threshold changes, these tests should fail.
@@ -12,7 +12,7 @@ import pytest
 
 import review
 
-DATA = Path(__file__).parent / "data"
+DATA = Path(__file__).resolve().parent.parent / "data"
 
 
 @pytest.fixture(scope="module")
